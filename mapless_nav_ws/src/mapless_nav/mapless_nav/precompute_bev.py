@@ -4,10 +4,12 @@ Precompute BEV features from recorded driving sessions.
 Runs DINOv2 + Depth Anything V2 on each frame, then does depth-based BEV
 projection matching the runtime bev_projection_node exactly.
 
-Run on Jetson:
-  python3 -m mapless_nav.precompute_bev --data_dir ~/mapless_nav_data
+Run on Mac:
+  scp -r nishan@192.168.1.125:~/mapless_nav_data/raw ./raw_data
+  python3 precompute_bev.py --data_dir ./raw_data
 
-Then copy bev_features/ to your Mac for training.
+Then train:
+  python3 train_reward.py --data_dir ./raw_data/bev_features
 """
 import argparse
 import os
@@ -104,7 +106,12 @@ def main():
     output_dir = args.output_dir or os.path.join(args.data_dir, 'bev_features')
     os.makedirs(output_dir, exist_ok=True)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     print(f'Device: {device}')
 
     # --- Load DINOv2 ---
