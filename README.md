@@ -96,21 +96,6 @@ python3 ~/dashboard/app.py
 
 ---
 
-## Wiring
-
-```
-Jetson USB         → ESP8266 USB (/dev/ttyUSB0, 500000 baud)
-ESP8266 D1         → ESC (throttle PWM)
-ESP8266 D2         → Servo (steering PWM)
-Jetson Pin 2 (5V)  → GPS VCC
-Jetson Pin 14 GND  → GPS GND
-Jetson Pin 10 RX   → GPS TX
-Jetson Pin 8  TX   → GPS RX
-EMEET camera       → Jetson USB
-```
-
----
-
 ## Math
 
 ### 1. Semantic Feature Extraction (DINOv2)
