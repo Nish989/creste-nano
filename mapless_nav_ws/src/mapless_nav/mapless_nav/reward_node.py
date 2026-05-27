@@ -1,10 +1,3 @@
-"""
-Reward Node - Scores trajectory candidates using contrastive reward model.
-Loads the ContrastiveRewardModel trained with InfoNCE loss.
-
-Input:  /bev/features, /planner/candidates
-Output: /reward/scores
-"""
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
@@ -15,14 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------------------
-# Model definition (must match train_reward.py)
-# ---------------------------------------------------------------------------
-
 class TrajectoryEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim=256, embed_dim=128):
         super().__init__()
-        self.encoder = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -31,16 +20,16 @@ class TrajectoryEncoder(nn.Module):
         )
 
     def forward(self, x):
-        return F.normalize(self.encoder(x), dim=-1)
+        return F.normalize(self.net(x), dim=-1)
 
 
-class RewardMLP(nn.Module):
-    def __init__(self, embed_dim=128, hidden_dim=64):
+class RewardHead(nn.Module):
+    def __init__(self, embed_dim=128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+            nn.Linear(embed_dim, 64),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(64, 1),
             nn.Sigmoid(),
         )
 
@@ -48,22 +37,15 @@ class RewardMLP(nn.Module):
         return self.net(z)
 
 
-class ContrastiveRewardModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim=256, embed_dim=128):
+class RewardModel(nn.Module):
+    def __init__(self, input_dim):
         super().__init__()
-        self.encoder = TrajectoryEncoder(input_dim, hidden_dim, embed_dim)
-        self.reward_head = RewardMLP(embed_dim)
-
-    def encode(self, x):
-        return self.encoder(x)
+        self.encoder = TrajectoryEncoder(input_dim)
+        self.head = RewardHead()
 
     def forward(self, x):
-        return self.reward_head(self.encoder(x))
+        return self.head(self.encoder(x))
 
-
-# ---------------------------------------------------------------------------
-# Node
-# ---------------------------------------------------------------------------
 
 class RewardNode(Node):
     def __init__(self):
@@ -78,71 +60,53 @@ class RewardNode(Node):
         self.bev_w = self.get_parameter('bev_width').value
         self.bev_h = self.get_parameter('bev_height').value
         self.feat_dim = self.get_parameter('feature_dim').value
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self._load_model()
-
         self.latest_bev = None
+        self._load_model()
 
         self.create_subscription(Float32MultiArray, '/bev/features', self.bev_cb, 5)
         self.create_subscription(Float32MultiArray, '/planner/candidates', self.candidates_cb, 5)
-
         self.scores_pub = self.create_publisher(Float32MultiArray, '/reward/scores', 5)
 
-        self.get_logger().info(f'Reward node started (device: {self.device})')
+        self.get_logger().info(f'reward node ready ({self.device})')
 
     def _load_model(self):
-        model_path = os.path.join(self.model_dir, 'reward_mlp.pth')
-        if not os.path.exists(model_path):
-            self.get_logger().warn(
-                f'Reward model not found at {model_path}. '
-                'Train with train_reward.py first.')
+        path = os.path.join(self.model_dir, 'reward_mlp.pth')
+        if not os.path.exists(path):
+            self.get_logger().warn(f'no model at {path}, train first')
             return
-
         try:
-            input_dim = 8 * self.feat_dim
-            self.model = ContrastiveRewardModel(input_dim=input_dim)
-            state = torch.load(model_path, map_location='cpu', weights_only=True)
-            self.model.load_state_dict(state)
+            self.model = RewardModel(8 * self.feat_dim)
+            self.model.load_state_dict(torch.load(path, map_location='cpu', weights_only=True))
             self.model.eval().to(self.device)
-            self.get_logger().info('Contrastive reward model loaded')
+            self.get_logger().info('reward model loaded')
         except Exception as e:
-            self.get_logger().error(f'Failed to load reward model: {e}')
+            self.get_logger().error(f'failed to load model: {e}')
 
     def bev_cb(self, msg):
-        self.latest_bev = np.array(msg.data).reshape(
-            self.bev_h, self.bev_w, self.feat_dim)
+        self.latest_bev = np.array(msg.data).reshape(self.bev_h, self.bev_w, self.feat_dim)
 
     def candidates_cb(self, msg):
         if self.latest_bev is None or self.model is None:
             return
 
-        data = np.array(msg.data)
-        n_candidates = msg.layout.dim[0].size
+        n_cand = msg.layout.dim[0].size
         n_steps = msg.layout.dim[1].size
-        candidates = data.reshape(n_candidates, n_steps, 2).astype(int)
+        cands = np.array(msg.data).reshape(n_cand, n_steps, 2).astype(int)
 
-        # Clip coordinates
-        by = np.clip(candidates[:, :, 0], 0, self.bev_h - 1)
-        bx = np.clip(candidates[:, :, 1], 0, self.bev_w - 1)
-
-        # Gather BEV features: [n_candidates, n_steps, feat_dim]
-        all_feats = self.latest_bev[by, bx]
-        batch = all_feats.reshape(n_candidates, -1).astype(np.float32)
-
-        tensor = torch.from_numpy(batch).to(self.device)
+        by = np.clip(cands[:, :, 0], 0, self.bev_h - 1)
+        bx = np.clip(cands[:, :, 1], 0, self.bev_w - 1)
+        batch = self.latest_bev[by, bx].reshape(n_cand, -1).astype(np.float32)
 
         with torch.no_grad():
-            scores = self.model(tensor).squeeze(-1).cpu().numpy()
+            scores = self.model(torch.from_numpy(batch).to(self.device)).squeeze(-1).cpu().numpy()
 
-        scores_msg = Float32MultiArray()
-        scores_msg.layout.dim = [
-            MultiArrayDimension(label='scores', size=n_candidates,
-                                stride=n_candidates),
-        ]
-        scores_msg.data = scores.tolist()
-        self.scores_pub.publish(scores_msg)
+        out = Float32MultiArray()
+        out.layout.dim = [MultiArrayDimension(label='scores', size=n_cand, stride=n_cand)]
+        out.data = scores.tolist()
+        self.scores_pub.publish(out)
 
 
 def main(args=None):
