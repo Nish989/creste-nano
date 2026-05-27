@@ -1,0 +1,94 @@
+pwm_control_node:
+  ros__parameters:
+    # ESP8266 serial bridge config
+    serial_port: '/dev/ttyUSB0'
+    serial_baud: 500000
+
+teleop_node:
+  ros__parameters:
+    # PS5 DualSense over Bluetooth mappings
+    steering_axis: 0        # left stick horizontal
+    throttle_axis: 5        # R2 trigger
+    brake_axis: 2           # L2 trigger
+    estop_button: 3         # Square - kill switch
+
+safety_node:
+  ros__parameters:
+    cmd_timeout_sec: 0.5    # stop if no commands received for this long
+    max_speed: 0.3          # max allowed speed fraction
+
+camera_node:
+  ros__parameters:
+    device: '/dev/video0'
+    width: 1280
+    height: 720
+    fps: 30
+
+gps_node:
+  ros__parameters:
+    port: '/dev/ttyTHS1'
+    baud: 115200
+    min_satellites: 10      # don't publish until this many sats locked
+
+compass_node:
+  ros__parameters:
+    i2c_bus: 1
+    rate_hz: 20.0
+    declination_deg: 2.5    # adjust for your location (check ngdc.noaa.gov)
+
+data_recorder_node:
+  ros__parameters:
+    output_dir: '/home/jetson/mapless_nav_data'
+    record_button: 2        # Square on PS5
+
+perception_node:
+  ros__parameters:
+    model_dir: '/home/jetson/models'
+    input_size: 518
+    depth_size: 518
+    use_tensorrt: true
+
+bev_projection_node:
+  ros__parameters:
+    bev_width: 64
+    bev_height: 64
+    bev_resolution: 0.15    # meters per cell (9.6m x 9.6m total)
+    camera_height: 0.35     # meters above ground (measure on your car)
+    camera_pitch: 15.0      # degrees below horizontal (measure on your car)
+    camera_fov_h: 90.0      # EMEET SmartCam Nova 4K horizontal FOV
+    camera_fov_v: 58.0      # EMEET SmartCam Nova 4K vertical FOV
+    dino_patch_size: 14
+    dino_input_size: 518
+
+reward_node:
+  ros__parameters:
+    model_dir: '/home/jetson/models/reward_model'
+    bev_width: 64
+    bev_height: 64
+    feature_dim: 384
+
+planner_node:
+  ros__parameters:
+    n_candidates: 21
+    n_steps: 8
+    bev_width: 64
+    bev_height: 64
+    max_steering: 1.0
+    auto_throttle: 0.10    # fixed throttle for autonomous mode (above cogging range)
+    waypoint_bias: 0.3
+    plan_rate_hz: 10.0
+
+speed_controller_node:
+  ros__parameters:
+    kp: 0.15
+    ki: 0.05
+    kd: 0.02
+    max_target_speed: 3.0   # m/s
+    min_throttle: 0.10      # floor to avoid brushless cogging
+    max_throttle: 0.12      # matches safety node / pwm_control_node limit
+    rate_hz: 10.0           # matches GPS update rate
+
+waypoint_manager_node:
+  ros__parameters:
+    route_file: ''
+    waypoint_radius: 3.0    # meters to consider waypoint "reached"

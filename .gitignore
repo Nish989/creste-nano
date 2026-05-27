@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ROS2 build artifacts
+mapless_nav_ws/build/
+mapless_nav_ws/install/
+mapless_nav_ws/log/
+
+# Models (too large for GitHub)
+models/
+*.pth
+*.engine
+*.onnx
+
+# Training data (too large)
+mapless_nav_data/
+bev_features/
+*.npz
+
+# Arduino cache
+.arduino15/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.jsonl
+
+# Env
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
