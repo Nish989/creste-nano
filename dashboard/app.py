@@ -77,6 +77,21 @@ def start_ros2_bridge():
             self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self.cam_cb, 5)
             self._last_push = 0
 
+            # Publishers for phone drive controls
+            self.cmd_steer_pub = self.create_publisher(Float64, '/cmd_steering', 10)
+            self.cmd_thr_pub = self.create_publisher(Float64, '/cmd_throttle', 10)
+            self.cmd_estop_pub = self.create_publisher(Bool, '/estop', 10)
+            self.cmd_record_pub = self.create_publisher(Bool, '/record_toggle', 10)
+            self.cmd_auto_pub = self.create_publisher(Bool, '/autonomous_mode', 10)
+            state['phone_pubs'] = {
+                'steer': self.cmd_steer_pub,
+                'throttle': self.cmd_thr_pub,
+                'estop': self.cmd_estop_pub,
+                'record': self.cmd_record_pub,
+                'auto': self.cmd_auto_pub,
+            }
+            state['last_phone_cmd'] = 0
+
             # Push metrics to WS clients at 2Hz
             self.create_timer(0.5, self.push_metrics)
 
@@ -121,6 +136,14 @@ def start_ros2_bridge():
         def push_metrics(self):
             if loop is None:
                 return
+            # Phone control watchdog — stop car if phone disconnects
+            lpc = state.get('last_phone_cmd', 0)
+            if lpc > 0 and (time.time() - lpc) > 0.5:
+                pubs = state.get('phone_pubs')
+                if pubs:
+                    pubs['steer'].publish(Float64(data=0.0))
+                    pubs['throttle'].publish(Float64(data=0.0))
+                state['last_phone_cmd'] = 0
             asyncio.run_coroutine_threadsafe(
                 broadcast({
                     'type': 'metrics',
@@ -339,6 +362,26 @@ async def handle_ws_message(ws, data):
             state['waypoints'].pop(idx)
             save_waypoints()
             await broadcast({'type': 'waypoints', 'waypoints': state['waypoints']})
+
+    elif action == 'phone_control':
+        pubs = state.get('phone_pubs')
+        if pubs:
+            s = max(-1.0, min(1.0, float(data.get('steering', 0))))
+            t = max(-1.0, min(1.0, float(data.get('throttle', 0))))
+            pubs['steer'].publish(Float64(data=s))
+            pubs['throttle'].publish(Float64(data=t))
+            state['last_phone_cmd'] = time.time()
+
+    elif action == 'phone_record':
+        pubs = state.get('phone_pubs')
+        if pubs:
+            pubs['record'].publish(Bool(data=True))
+
+    elif action == 'phone_auto':
+        pubs = state.get('phone_pubs')
+        if pubs:
+            auto = not state['metrics'].get('autonomous', False)
+            pubs['auto'].publish(Bool(data=auto))
 
 # ── HTML / CSS / JS (single file dashboard) ───────────────────────────────────
 
@@ -595,6 +638,39 @@ HTML = """<!DOCTYPE html>
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
   }
+
+  /* Phone drive overlay — fixed at bottom when driving */
+  .drive-overlay {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 200px;
+    background: rgba(10,10,15,0.97);
+    border-top: 2px solid #76c7ff;
+    display: none;
+    align-items: center;
+    justify-content: space-around;
+    z-index: 99;
+    padding: 10px 20px;
+  }
+  .drive-overlay.active { display: flex; }
+  .drive-joy-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .joy-label { font-size: 9px; color: #444; text-transform: uppercase; letter-spacing: 2px; }
+  .drive-info { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+  .drive-speed { font-size: 28px; font-weight: 700; color: #76c7ff; font-variant-numeric: tabular-nums; }
+  .drive-steer-val { font-size: 12px; color: #555; font-variant-numeric: tabular-nums; }
+  .drive-estop {
+    background: #ff3b30; color: white; border: none; border-radius: 50%;
+    width: 80px; height: 80px; font-size: 13px; font-weight: 800; cursor: pointer;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .drive-estop:active { background: #cc0000; transform: scale(0.95); }
+  .drive-toggles { display: flex; gap: 8px; }
+  .drive-toggle {
+    padding: 8px 16px; background: #1a1a2e; border: 1px solid #333;
+    border-radius: 8px; color: #888; font-size: 11px; font-weight: 600; cursor: pointer;
+    touch-action: manipulation;
+  }
+  .drive-toggle.on { border-color: #4caf50; color: #4caf50; background: #1a2e1a; }
 </style>
 </head>
 <body>
@@ -700,6 +776,23 @@ HTML = """<!DOCTYPE html>
 
 </div>
 
+<!-- Phone Drive Controls — fixed at bottom when a mode is active -->
+<div class="drive-overlay" id="driveOverlay">
+  <div class="drive-joy-wrap">
+    <canvas id="joystick" width="160" height="160"></canvas>
+    <div class="joy-label">DRAG TO DRIVE</div>
+  </div>
+  <div class="drive-info">
+    <div class="drive-speed" id="driveSpeed">0.0 m/s</div>
+    <div class="drive-steer-val" id="driveSteer">STR 0.00</div>
+    <button class="drive-estop" id="driveEstop">E-STOP</button>
+    <div class="drive-toggles">
+      <button class="drive-toggle" id="drvRec" onclick="toggleRecord()">⏺ REC</button>
+      <button class="drive-toggle" id="drvAuto" onclick="toggleAuto()">🤖 AUTO</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws;
@@ -772,19 +865,28 @@ function estop() {
 // ── Mode UI ───────────────────────────────────────────────────────────────────
 function setMode(mode) {
   currentMode = mode;
-  const pill = document.getElementById('statusPill');
-  pill.className = `status-pill status-${mode}`;
+  var pill = document.getElementById('statusPill');
+  pill.className = 'status-pill status-' + mode;
   pill.textContent = mode.replace('_', ' ').toUpperCase();
-  document.getElementById('val-mode').textContent = mode.replace('_',' ').toUpperCase();
 
   // Highlight active button
-  document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.btn').forEach(function(b) { b.classList.remove('active'); });
   if (mode !== 'idle') {
-    document.querySelectorAll('.btn').forEach(b => {
-      if (b.textContent.toLowerCase().includes(mode.replace('_',''))) {
+    document.querySelectorAll('.btn').forEach(function(b) {
+      if (b.textContent.toLowerCase().indexOf(mode.replace('_','')) >= 0) {
         b.classList.add('active');
       }
     });
+  }
+
+  // Show/hide phone drive overlay
+  var overlay = document.getElementById('driveOverlay');
+  if (mode !== 'idle') {
+    overlay.classList.add('active');
+    document.body.style.paddingBottom = '210px';
+  } else {
+    overlay.classList.remove('active');
+    document.body.style.paddingBottom = '0';
   }
 }
 
@@ -826,9 +928,23 @@ function updateMetrics(m) {
   }
 
   // Color NIR
-  const nirEl = document.getElementById('m-nir');
-  const nir = m.nir || 0;
+  var nirEl = document.getElementById('m-nir');
+  var nir = m.nir || 0;
   nirEl.className = 'metric ' + (nir < 1 ? 'good' : nir < 5 ? 'warn' : '');
+
+  // Update drive overlay readouts
+  var ds = document.getElementById('driveSpeed');
+  if (ds) ds.textContent = (m.speed || 0).toFixed(1) + ' m/s';
+
+  // Update REC/AUTO button states
+  var recBtn = document.getElementById('drvRec');
+  var autoBtn = document.getElementById('drvAuto');
+  if (recBtn) {
+    if (m.recording) { recBtn.classList.add('on'); } else { recBtn.classList.remove('on'); }
+  }
+  if (autoBtn) {
+    if (m.autonomous) { autoBtn.classList.add('on'); } else { autoBtn.classList.remove('on'); }
+  }
 }
 
 // ── Terminal ──────────────────────────────────────────────────────────────────
@@ -934,6 +1050,129 @@ function removeWaypoint(idx) {
 function centerOnCar() {
   if (carMarker && map) map.setView(carMarker.getLatLng(), 18);
 }
+
+// ── Phone Drive Joystick ─────────────────────────────────────────────────────
+var joyCanvas, joyCtx;
+var joyX = 0, joyY = 0, joyActive = false;
+var JR = 60, TR = 22;  // joystick radius, thumb radius
+
+function initJoystick() {
+  joyCanvas = document.getElementById('joystick');
+  if (!joyCanvas) return;
+  joyCtx = joyCanvas.getContext('2d');
+
+  // Touch events
+  joyCanvas.addEventListener('touchstart', function(e) {
+    e.preventDefault(); joyActive = true; joyFromTouch(e.touches[0]);
+  }, {passive: false});
+  joyCanvas.addEventListener('touchmove', function(e) {
+    e.preventDefault(); joyFromTouch(e.touches[0]);
+  }, {passive: false});
+  joyCanvas.addEventListener('touchend', function(e) {
+    e.preventDefault(); joyActive = false; joyX = 0; joyY = 0; drawJoy();
+  }, {passive: false});
+
+  // Mouse fallback (desktop testing)
+  var mouseDown = false;
+  joyCanvas.addEventListener('mousedown', function(e) { mouseDown = true; joyActive = true; joyFromMouse(e); });
+  window.addEventListener('mousemove', function(e) { if (mouseDown) joyFromMouse(e); });
+  window.addEventListener('mouseup', function() {
+    if (mouseDown) { mouseDown = false; joyActive = false; joyX = 0; joyY = 0; drawJoy(); }
+  });
+
+  // E-STOP button — immediate, no confirm
+  var estopBtn = document.getElementById('driveEstop');
+  estopBtn.addEventListener('touchstart', function(e) { e.preventDefault(); estopNow(); }, {passive: false});
+  estopBtn.addEventListener('click', function(e) { estopNow(); });
+
+  drawJoy();
+
+  // Send phone commands at 20Hz when joystick active
+  setInterval(function() {
+    if (joyX !== 0 || joyY !== 0) {
+      send({action: 'phone_control', steering: Math.round(joyX * 100) / 100, throttle: Math.round(joyY * 100) / 100});
+      var stEl = document.getElementById('driveSteer');
+      if (stEl) stEl.textContent = 'STR ' + joyX.toFixed(2) + '  THR ' + joyY.toFixed(2);
+    }
+  }, 50);
+}
+
+function joyFromTouch(touch) {
+  var rect = joyCanvas.getBoundingClientRect();
+  var cx = rect.width / 2, cy = rect.height / 2;
+  var dx = (touch.clientX - rect.left - cx) / JR;
+  var dy = -(touch.clientY - rect.top - cy) / JR;
+  applyJoy(dx, dy);
+}
+
+function joyFromMouse(e) {
+  var rect = joyCanvas.getBoundingClientRect();
+  var cx = rect.width / 2, cy = rect.height / 2;
+  var dx = (e.clientX - rect.left - cx) / JR;
+  var dy = -(e.clientY - rect.top - cy) / JR;
+  applyJoy(dx, dy);
+}
+
+function applyJoy(dx, dy) {
+  var dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist > 1) { dx /= dist; dy /= dist; }
+  if (Math.abs(dx) < 0.12) dx = 0;
+  if (Math.abs(dy) < 0.12) dy = 0;
+  joyX = dx; joyY = dy;
+  drawJoy();
+}
+
+function drawJoy() {
+  var w = joyCanvas.width, h = joyCanvas.height;
+  var cx = w / 2, cy = h / 2;
+  joyCtx.clearRect(0, 0, w, h);
+
+  // Outer ring
+  joyCtx.beginPath();
+  joyCtx.arc(cx, cy, JR, 0, Math.PI * 2);
+  joyCtx.strokeStyle = '#333';
+  joyCtx.lineWidth = 2;
+  joyCtx.stroke();
+
+  // Crosshair
+  joyCtx.beginPath();
+  joyCtx.moveTo(cx - JR, cy); joyCtx.lineTo(cx + JR, cy);
+  joyCtx.moveTo(cx, cy - JR); joyCtx.lineTo(cx, cy + JR);
+  joyCtx.strokeStyle = '#1a1a2e';
+  joyCtx.lineWidth = 1;
+  joyCtx.stroke();
+
+  // Labels
+  joyCtx.font = '9px sans-serif';
+  joyCtx.fillStyle = '#333';
+  joyCtx.textAlign = 'center';
+  joyCtx.fillText('FWD', cx, cy - JR - 4);
+  joyCtx.fillText('REV', cx, cy + JR + 12);
+  joyCtx.fillText('L', cx - JR - 8, cy + 3);
+  joyCtx.fillText('R', cx + JR + 8, cy + 3);
+
+  // Thumb
+  var tx = cx + joyX * JR;
+  var ty = cy - joyY * JR;
+  joyCtx.beginPath();
+  joyCtx.arc(tx, ty, TR, 0, Math.PI * 2);
+  joyCtx.fillStyle = joyActive ? '#76c7ff' : '#444';
+  joyCtx.fill();
+  joyCtx.strokeStyle = joyActive ? '#5ab0e8' : '#333';
+  joyCtx.lineWidth = 2;
+  joyCtx.stroke();
+}
+
+function estopNow() {
+  send({action: 'estop'});
+  joyActive = false; joyX = 0; joyY = 0;
+  if (joyCtx) drawJoy();
+}
+
+function toggleRecord() { send({action: 'phone_record'}); }
+function toggleAuto() { send({action: 'phone_auto'}); }
+
+window.addEventListener('load', initJoystick);
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.getElementById('cameraImg').src = 'http://' + location.host + '/stream';
