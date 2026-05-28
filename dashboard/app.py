@@ -281,6 +281,17 @@ async def handle_stream(request):
             )
         await asyncio.sleep(0.1)  # ~10fps
 
+async def handle_tile(request):
+    """Serve cached OSM tiles for offline map."""
+    z = request.match_info['z']
+    x = request.match_info['x']
+    y = request.match_info['y']
+    tile_path = os.path.join(os.path.dirname(__file__), 'static', 'tiles', z, x, f'{y}.png')
+    if os.path.exists(tile_path):
+        return web.FileResponse(tile_path)
+    # Transparent 1x1 PNG for missing tiles
+    return web.Response(status=204)
+
 async def handle_snapshot(request):
     """Single JPEG frame — Safari-friendly alternative to MJPEG stream."""
     jpeg = state.get('latest_jpeg')
@@ -326,9 +337,10 @@ async def handle_ws_message(ws, data):
         await broadcast({'type': 'mode', 'mode': mode})
         # Tell teleop_node to enter autonomous mode (no PS5 needed)
         if mode == 'autonomous':
+            # Delay so teleop_node has time to start and subscribe
             subprocess.Popen(
-                f'bash -c "source {WS_DIR}/install/setup.bash && '
-                f'ros2 topic pub --once /set_autonomous std_msgs/msg/Bool data:\\ true"',
+                f'bash -c "sleep 8 && source {WS_DIR}/install/setup.bash && '
+                f'ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool data:\\ true"',
                 shell=True
             )
 
@@ -336,7 +348,7 @@ async def handle_ws_message(ws, data):
         # Tell teleop_node to exit autonomous mode
         subprocess.Popen(
             f'bash -c "source {WS_DIR}/install/setup.bash && '
-            f'ros2 topic pub --once /set_autonomous std_msgs/msg/Bool data:\\ false"',
+            f'ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool data:\\ false"',
             shell=True
         )
         threading.Thread(target=stop_current, daemon=True).start()
@@ -882,10 +894,13 @@ function initMap() {
     return;
   }
   map = L.map("map").setView([30.5083, -97.6789], 17);
-  // Try loading OSM tiles — works on WiFi, silently fails on hotspot
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  // Use local cached tiles (works offline), fall back to OSM on WiFi
+  var tileUrl = (location.hostname === '10.42.0.1')
+    ? '/tiles/{z}/{x}/{y}'
+    : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  L.tileLayer(tileUrl, {
     attribution: "OpenStreetMap",
-    maxZoom: 19,
+    maxZoom: 18,
     errorTileUrl: '',
   }).addTo(map);
   carIcon = L.divIcon({
@@ -990,6 +1005,7 @@ async def create_app():
     app.router.add_get('/', handle_index)
     app.router.add_get('/stream', handle_stream)
     app.router.add_get('/snapshot', handle_snapshot)
+    app.router.add_get('/tiles/{z}/{x}/{y}', handle_tile)
     app.router.add_get('/ws', handle_ws)
     app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))
     return app
