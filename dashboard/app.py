@@ -1,17 +1,3 @@
-"""
-CREStE-Nano Dashboard
-A clean web control panel for the mapless navigation robot.
-Runs on Jetson, access from phone at http://192.168.1.125:8080
-
-Features:
-- One-tap launch of ROS2 modes (teleop, data collection, autonomous)
-- Live GPS map with waypoint planner
-- Live camera feed
-- Live NIR metrics
-- Emergency stop
-- ROS2 log terminal
-"""
-
 import asyncio
 import json
 import os
@@ -24,6 +10,16 @@ from aiohttp import web
 import aiohttp
 import yaml
 
+# ROS2 bridge — optional (only works on Jetson where rclpy is installed)
+try:
+    import rclpy
+    from rclpy.node import Node as RclpyNode
+    from sensor_msgs.msg import NavSatFix
+    from std_msgs.msg import Float64, Bool, String
+    HAS_RCLPY = True
+except ImportError:
+    HAS_RCLPY = False
+
 # ── Config ────────────────────────────────────────────────────────────────────
 WS_DIR = os.path.expanduser('~/mapless_nav_ws')
 DATA_DIR = os.path.expanduser('~/mapless_nav_data')
@@ -35,18 +31,108 @@ state = {
     'mode': 'idle',           # idle | teleop | data_collection | autonomous
     'process': None,          # current ROS2 subprocess
     'log_lines': [],          # last 100 log lines
+    'ros2_connected': False,  # True when rclpy bridge is receiving data
     'metrics': {
         'nir': 0.0,
         'interventions': 0,
         'autonomous_meters': 0.0,
-        'gps_lat': 30.5083,   # default Austin TX
-        'gps_lon': -97.6789,
+        'gps_lat': None,
+        'gps_lon': None,
+        'gps_sats': 0,
+        'gps_fix': -1,
         'speed': 0.0,
+        'heading': 0.0,
+        'steering': 0.0,
+        'throttle': 0.0,
+        'autonomous': False,
+        'recording': False,
         'online_updates': 0,
     },
     'waypoints': [],
     'ws_clients': set(),
 }
+
+# ── ROS2 Topic Bridge ────────────────────────────────────────────────────────
+
+def start_ros2_bridge():
+    if not HAS_RCLPY:
+        return
+    try:
+        rclpy.init()
+    except RuntimeError:
+        pass  # already initialized
+
+    class BridgeNode(RclpyNode):
+        def __init__(self):
+            super().__init__('dashboard_bridge')
+            self.create_subscription(NavSatFix, '/gps/fix', self.gps_cb, 10)
+            self.create_subscription(Float64, '/gps/speed', self.speed_cb, 10)
+            self.create_subscription(Float64, '/gps/course', self.heading_cb, 10)
+            self.create_subscription(Float64, '/cmd_steering', self.steer_cb, 10)
+            self.create_subscription(Float64, '/cmd_throttle', self.throttle_cb, 10)
+            self.create_subscription(Bool, '/autonomous_mode', self.auto_cb, 10)
+            self.create_subscription(Bool, '/recording', self.recording_cb, 10)
+            self.create_subscription(String, '/intervention_stats', self.stats_cb, 10)
+            self._last_push = 0
+
+            # Push metrics to WS clients at 2Hz
+            self.create_timer(0.5, self.push_metrics)
+
+        def gps_cb(self, msg):
+            state['ros2_connected'] = True
+            if msg.status.status >= 0:
+                state['metrics']['gps_lat'] = msg.latitude
+                state['metrics']['gps_lon'] = msg.longitude
+                state['metrics']['gps_fix'] = msg.status.status
+
+        def speed_cb(self, msg):
+            state['metrics']['speed'] = msg.data
+
+        def heading_cb(self, msg):
+            state['metrics']['heading'] = msg.data
+
+        def steer_cb(self, msg):
+            state['metrics']['steering'] = msg.data
+
+        def throttle_cb(self, msg):
+            state['metrics']['throttle'] = msg.data
+
+        def auto_cb(self, msg):
+            state['metrics']['autonomous'] = msg.data
+
+        def recording_cb(self, msg):
+            state['metrics']['recording'] = msg.data
+
+        def stats_cb(self, msg):
+            try:
+                d = json.loads(msg.data)
+                state['metrics']['interventions'] = d.get('interventions', 0)
+                state['metrics']['autonomous_meters'] = d.get('meters', 0.0)
+                state['metrics']['nir'] = d.get('nir', 0.0)
+                state['metrics']['online_updates'] = d.get('updates', 0)
+            except Exception:
+                pass
+
+        def push_metrics(self):
+            if loop is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                broadcast({
+                    'type': 'metrics',
+                    'data': state['metrics'],
+                    'ros2': state['ros2_connected'],
+                }),
+                loop,
+            )
+
+    node = BridgeNode()
+    try:
+        rclpy.spin(node)
+    except Exception:
+        pass
+    finally:
+        node.destroy_node()
+
 
 # ── ROS2 Process Management ────────────────────────────────────────────────────
 
@@ -138,7 +224,6 @@ async def broadcast(msg):
 # ── Metrics polling (reads intervention stats from ROS2 topic via file) ────────
 
 def poll_metrics():
-    """Poll intervention stats log file for live metrics."""
     interventions_log = os.path.join(DATA_DIR, 'interventions', 'interventions.jsonl')
     last_size = 0
     while True:
@@ -179,6 +264,7 @@ async def handle_ws(request):
         'type': 'init',
         'mode': state['mode'],
         'metrics': state['metrics'],
+        'ros2': state['ros2_connected'],
         'waypoints': state['waypoints'],
         'logs': state['log_lines'][-50:],
     }))
@@ -490,7 +576,8 @@ HTML = """<!DOCTYPE html>
 <div class="header">
   <h1>CREStE<span>-Nano</span> 🤖</h1>
   <div style="display:flex;align-items:center;gap:10px">
-    <span><span class="conn-dot" id="connDot"></span><span id="connText" style="font-size:12px;color:#555">Connecting...</span></span>
+    <span><span class="conn-dot" id="connDot"></span><span id="connText" style="font-size:11px;color:#555">WS</span></span>
+    <span><span class="conn-dot" id="ros2Dot"></span><span id="ros2Text" style="font-size:11px;color:#555">ROS2</span></span>
     <span class="status-pill status-idle" id="statusPill">IDLE</span>
   </div>
 </div>
@@ -526,24 +613,24 @@ HTML = """<!DOCTYPE html>
         <div class="label">NIR/100m</div>
       </div>
       <div class="metric">
+        <div class="value" id="val-speed">0.0</div>
+        <div class="label">Speed m/s</div>
+      </div>
+      <div class="metric">
+        <div class="value" id="val-heading">—</div>
+        <div class="label">Heading °</div>
+      </div>
+      <div class="metric">
+        <div class="value" id="val-steering">0.0</div>
+        <div class="label">Steering</div>
+      </div>
+      <div class="metric">
         <div class="value" id="val-interventions">0</div>
         <div class="label">Interventions</div>
       </div>
       <div class="metric good">
         <div class="value" id="val-meters">0</div>
         <div class="label">Auto Meters</div>
-      </div>
-      <div class="metric">
-        <div class="value" id="val-speed">0.0</div>
-        <div class="label">m/s</div>
-      </div>
-      <div class="metric">
-        <div class="value" id="val-updates">0</div>
-        <div class="label">Online Updates</div>
-      </div>
-      <div class="metric">
-        <div class="value" id="val-mode">IDLE</div>
-        <div class="label">Mode</div>
       </div>
     </div>
   </div>
@@ -613,6 +700,7 @@ function connect() {
     if (msg.type === 'init') {
       setMode(msg.mode);
       updateMetrics(msg.metrics);
+      setRos2(msg.ros2);
       setWaypoints(msg.waypoints || []);
       msg.logs.forEach(line => appendLog(line));
     }
@@ -624,6 +712,7 @@ function connect() {
     }
     else if (msg.type === 'metrics') {
       updateMetrics(msg.data);
+      if (msg.ros2 !== undefined) setRos2(msg.ros2);
     }
     else if (msg.type === 'waypoints') {
       setWaypoints(msg.waypoints);
@@ -669,6 +758,16 @@ function setMode(mode) {
   }
 }
 
+// ── ROS2 Status ──────────────────────────────────────────────────────────────
+function setRos2(connected) {
+  const dot = document.getElementById('ros2Dot');
+  if (connected) {
+    dot.classList.add('connected');
+  } else {
+    dot.classList.remove('connected');
+  }
+}
+
 // ── Metrics ───────────────────────────────────────────────────────────────────
 function updateMetrics(m) {
   document.getElementById('val-nir').textContent =
@@ -678,7 +777,10 @@ function updateMetrics(m) {
     m.autonomous_meters ? Math.round(m.autonomous_meters) : 0;
   document.getElementById('val-speed').textContent =
     m.speed !== undefined ? m.speed.toFixed(1) : '0.0';
-  document.getElementById('val-updates').textContent = m.online_updates || 0;
+  document.getElementById('val-heading').textContent =
+    m.heading !== undefined ? Math.round(m.heading) + '°' : '—';
+  document.getElementById('val-steering').textContent =
+    m.steering !== undefined ? m.steering.toFixed(2) : '0.0';
 
   // Update car position on map
   if (m.gps_lat && m.gps_lon) {
@@ -815,7 +917,14 @@ async def main():
 
     load_waypoints()
 
-    # Start metrics poller in background
+    # Start ROS2 topic bridge (subscribes to GPS, speed, steering, etc.)
+    if HAS_RCLPY:
+        threading.Thread(target=start_ros2_bridge, daemon=True).start()
+        print('  ROS2 bridge: enabled (rclpy found)')
+    else:
+        print('  ROS2 bridge: disabled (rclpy not found, run on Jetson)')
+
+    # Start metrics poller in background (fallback for interventions file)
     t = threading.Thread(target=poll_metrics, daemon=True)
     t.start()
 
