@@ -242,8 +242,8 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CREStE-Nano Dashboard</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" onerror=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" onerror="window.L=null"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -565,7 +565,7 @@ HTML = """<!DOCTYPE html>
     <h2>📷 Camera Feed</h2>
     <div class="camera-feed">
       <img id="cameraImg"
-           src="http://192.168.1.125:8081/stream"
+           src=""
            onerror="this.style.display='none';document.getElementById('camOffline').style.display='flex'"
            style="display:block"/>
       <div id="camOffline" style="display:none;flex-direction:column;align-items:center;gap:8px;color:#333">
@@ -712,12 +712,16 @@ function appendLog(line) {
 }
 
 // ── Map ───────────────────────────────────────────────────────────────────────
-const map = L.map('map').setView([30.5083, -97.6789], 17);
-
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap',
-  maxZoom: 19,
-}).addTo(map);
+let map = null;
+if (typeof L !== "undefined" && L !== null) {
+  map = L.map("map").setView([30.5083, -97.6789], 17);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "OpenStreetMap",
+    maxZoom: 19,
+  }).addTo(map);
+} else {
+  document.getElementById("map").innerHTML = "<div style=\"display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px\">Map unavailable offline — GPS coordinates shown in metrics</div>";
+}
 
 // Car marker
 const carIcon = L.divIcon({
@@ -727,6 +731,7 @@ const carIcon = L.divIcon({
 });
 
 function updateCarPosition(lat, lon) {
+  if (!map) return;
   if (!carMarker) {
     carMarker = L.marker([lat, lon], { icon: carIcon }).addTo(map);
   } else {
@@ -735,7 +740,7 @@ function updateCarPosition(lat, lon) {
 }
 
 // Tap to add waypoints
-map.on('click', (e) => {
+if (map) map.on('click', (e) => {
   const { lat, lng } = e.latlng;
   send({ action: 'add_waypoint', lat, lon: lng });
 });
@@ -744,7 +749,7 @@ function setWaypoints(wps) {
   waypoints = wps;
 
   // Remove old markers
-  waypointMarkers.forEach(m => map.removeLayer(m));
+  waypointMarkers.forEach(m => { if (map) map.removeLayer(m); });
   waypointMarkers = [];
 
   wps.forEach((wp, i) => {
@@ -753,7 +758,8 @@ function setWaypoints(wps) {
       iconSize: [0,0],
       className: '',
     });
-    const marker = L.marker([wp.lat, wp.lon], { icon }).addTo(map);
+    const marker = L.marker([wp.lat, wp.lon], { icon });
+    if (map) marker.addTo(map);
     waypointMarkers.push(marker);
   });
 
@@ -782,10 +788,11 @@ function removeWaypoint(idx) {
 }
 
 function centerOnCar() {
-  if (carMarker) map.setView(carMarker.getLatLng(), 18);
+  if (carMarker && map) map.setView(carMarker.getLatLng(), 18);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+document.getElementById('cameraImg').src = 'http://' + location.hostname + ':8081/stream';
 connect();
 </script>
 </body>

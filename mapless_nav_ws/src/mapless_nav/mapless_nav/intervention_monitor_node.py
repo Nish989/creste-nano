@@ -27,16 +27,25 @@ class TrajectoryEncoder(nn.Module):
         return F.normalize(self.net(x), dim=-1)
 
 
-class RewardModel(nn.Module):
-    def __init__(self, input_dim):
+class RewardHead(nn.Module):
+    def __init__(self, embed_dim=128):
         super().__init__()
-        self.encoder = TrajectoryEncoder(input_dim)
-        self.head = nn.Sequential(
-            nn.Linear(128, 64),
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid(),
         )
+
+    def forward(self, z):
+        return self.net(z)
+
+
+class RewardModel(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.encoder = TrajectoryEncoder(input_dim)
+        self.head = RewardHead()
 
     def forward(self, x):
         return self.head(self.encoder(x))

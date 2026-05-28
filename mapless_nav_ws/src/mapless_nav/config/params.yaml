@@ -38,12 +38,12 @@ compass_node:
 
 data_recorder_node:
   ros__parameters:
-    output_dir: '/home/jetson/mapless_nav_data'
+    output_dir: '/home/nishan/mapless_nav_data'
     record_button: 2        # Square on PS5
 
 perception_node:
   ros__parameters:
-    model_dir: '/home/jetson/models'
+    model_dir: '/home/nishan/models'
     input_size: 518
     depth_size: 518
     use_tensorrt: true
@@ -62,21 +62,24 @@ bev_projection_node:
 
 reward_node:
   ros__parameters:
-    model_dir: '/home/jetson/models/reward_model'
+    model_dir: '/home/nishan/models/reward_model'
     bev_width: 64
     bev_height: 64
     feature_dim: 384
 
 planner_node:
   ros__parameters:
-    n_candidates: 21
+    n_samples: 1000
     n_steps: 8
+    lambda_temp: 0.1
+    sigma_noise: 0.3
     bev_width: 64
     bev_height: 64
     max_steering: 1.0
-    auto_throttle: 0.10    # fixed throttle for autonomous mode (above cogging range)
+    auto_throttle: 0.10
     waypoint_bias: 0.3
     plan_rate_hz: 10.0
+    momentum: 0.8
 
 speed_controller_node:
   ros__parameters:
