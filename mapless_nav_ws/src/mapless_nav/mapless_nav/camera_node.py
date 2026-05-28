@@ -102,6 +102,16 @@ class CameraNode(Node):
         if not ret or frame is None:
             return
 
+        # Software auto-exposure: fix blown-out frames
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = gray.mean()
+        if brightness > 170:  # overexposed
+            scale = 130.0 / brightness
+            frame = cv2.convertScaleAbs(frame, alpha=scale, beta=0)
+        elif brightness < 50:  # underexposed
+            scale = 100.0 / max(brightness, 1)
+            frame = cv2.convertScaleAbs(frame, alpha=min(scale, 3.0), beta=20)
+
         ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
         if not ok:
             return
