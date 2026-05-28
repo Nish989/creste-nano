@@ -88,24 +88,31 @@ def start_ros2_bridge():
                 state['metrics']['gps_fix'] = msg.status.status
 
         def speed_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['speed'] = msg.data
 
         def heading_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['heading'] = msg.data
 
         def steer_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['steering'] = msg.data
 
         def throttle_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['throttle'] = msg.data
 
         def auto_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['autonomous'] = msg.data
 
         def recording_cb(self, msg):
+            state['ros2_connected'] = True
             state['metrics']['recording'] = msg.data
 
         def cam_cb(self, msg):
+            state['ros2_connected'] = True
             state['latest_jpeg'] = bytes(msg.data)
 
         def stats_cb(self, msg):
@@ -273,6 +280,17 @@ async def handle_stream(request):
                 b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n'
             )
         await asyncio.sleep(0.1)  # ~10fps
+
+async def handle_snapshot(request):
+    """Single JPEG frame — Safari-friendly alternative to MJPEG stream."""
+    jpeg = state.get('latest_jpeg')
+    if jpeg:
+        return web.Response(
+            body=jpeg,
+            content_type='image/jpeg',
+            headers={'Cache-Control': 'no-store'},
+        )
+    return web.Response(status=204)
 
 async def handle_ws(request):
     ws = web.WebSocketResponse()
@@ -693,10 +711,7 @@ HTML = """<!DOCTYPE html>
   <div class="card">
     <h2>📷 Camera Feed</h2>
     <div class="camera-feed">
-      <img id="cameraImg"
-           src=""
-           onerror="this.style.display='none';document.getElementById('camOffline').style.display='flex'"
-           style="display:block"/>
+      <img id="cameraImg" src="" style="display:none"/>
       <div id="camOffline" style="display:none;flex-direction:column;align-items:center;gap:8px;color:#333">
         <span style="font-size:32px">📷</span>
         <span>Camera offline</span>
@@ -948,7 +963,23 @@ function centerOnCar() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-document.getElementById('cameraImg').src = 'http://' + location.host + '/stream';
+// Use snapshot polling instead of MJPEG stream (Safari doesn't handle MJPEG well)
+var camImg = document.getElementById('cameraImg');
+var camBase = 'http://' + location.host + '/snapshot';
+function refreshCam() {
+  var img = new Image();
+  img.onload = function() {
+    camImg.src = img.src;
+    camImg.style.display = 'block';
+    document.getElementById('camOffline').style.display = 'none';
+    setTimeout(refreshCam, 100);
+  };
+  img.onerror = function() {
+    setTimeout(refreshCam, 500);
+  };
+  img.src = camBase + '?t=' + Date.now();
+}
+refreshCam();
 connect();
 </script>
 </body>
@@ -963,6 +994,7 @@ async def create_app():
     app = web.Application()
     app.router.add_get('/', handle_index)
     app.router.add_get('/stream', handle_stream)
+    app.router.add_get('/snapshot', handle_snapshot)
     app.router.add_get('/ws', handle_ws)
     return app
 
