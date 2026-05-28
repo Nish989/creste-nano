@@ -379,14 +379,8 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CREStE-Nano Dashboard</title>
-<script>
-  // On hotspot (10.42.0.x) skip Leaflet — no internet. On home WiFi, load it.
-  window.L = null;
-  if (location.hostname !== '10.42.0.1') {
-    document.write('<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>');
-    document.write('<scr'+'ipt src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/scr'+'ipt>');
-  }
-</script>
+<link rel="stylesheet" href="/static/leaflet.css"/>
+<script src="/static/leaflet.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -884,26 +878,27 @@ let carIcon = null;
 
 function initMap() {
   if (typeof L === "undefined" || L === null) {
-    document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable offline — GPS in metrics</div>';
+    document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable — Leaflet failed to load</div>';
     return;
   }
   map = L.map("map").setView([30.5083, -97.6789], 17);
+  // Try loading OSM tiles — works on WiFi, silently fails on hotspot
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "OpenStreetMap",
     maxZoom: 19,
+    errorTileUrl: '',
   }).addTo(map);
   carIcon = L.divIcon({
     html: '<div style="font-size:24px;transform:translate(-50%,-50%)">🚗</div>',
     iconSize: [0,0],
     className: '',
   });
-  map.on('click', (e) => {
-    const { lat, lng } = e.latlng;
-    send({ action: 'add_waypoint', lat, lon: lng });
+  map.on('click', function(e) {
+    send({ action: 'add_waypoint', lat: e.latlng.lat, lon: e.latlng.lng });
   });
 }
 
-// Init map after page loads (Leaflet loaded synchronously on home WiFi, skipped on hotspot)
+// Init map after page loads (Leaflet bundled locally — works offline)
 window.addEventListener('load', initMap);
 
 function updateCarPosition(lat, lon) {
@@ -996,6 +991,7 @@ async def create_app():
     app.router.add_get('/stream', handle_stream)
     app.router.add_get('/snapshot', handle_snapshot)
     app.router.add_get('/ws', handle_ws)
+    app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))
     return app
 
 async def main():
