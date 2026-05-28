@@ -34,6 +34,7 @@ class GPSNode(Node):
         self.has_fix = False
         self.num_sats = 0
         self.buf = bytearray()
+        self._smooth_heading = None  # smoothed heading (degrees)
 
         # Poll at 50Hz to keep up with 10Hz GPS output
         self.create_timer(0.02, self.read_serial)
@@ -157,9 +158,24 @@ class GPSNode(Node):
 
         self.fix_pub.publish(fix)
 
-        # Publish speed and course
+        # Publish speed
         self.speed_pub.publish(Float64(data=g_speed))
-        self.course_pub.publish(Float64(data=head_mot))
+
+        # Publish heading only when moving (GPS course is noise below 0.5 m/s)
+        if abs(g_speed) > 0.5:
+            import math
+            if self._smooth_heading is None:
+                self._smooth_heading = head_mot
+            else:
+                # Circular smoothing (handles 359->1 wraparound)
+                diff = head_mot - self._smooth_heading
+                if diff > 180:
+                    diff -= 360
+                elif diff < -180:
+                    diff += 360
+                alpha = 0.3  # smoothing factor (lower = smoother)
+                self._smooth_heading = (self._smooth_heading + alpha * diff) % 360
+            self.course_pub.publish(Float64(data=self._smooth_heading))
 
     def destroy_node(self):
         if self.ser and self.ser.is_open:

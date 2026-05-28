@@ -893,7 +893,7 @@ function initMap() {
     document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable — Leaflet failed to load</div>';
     return;
   }
-  map = L.map("map").setView([30.5083, -97.6789], 17);
+  map = L.map("map").setView([30.5389, -97.7095], 17);
   // Use local cached tiles (works offline), fall back to OSM on WiFi
   var tileUrl = (location.hostname === '10.42.0.1')
     ? '/tiles/{z}/{x}/{y}'

@@ -27,9 +27,12 @@ class CameraNode(Node):
 
         self.cap = None
 
+        # Set auto-exposure BEFORE opening the pipeline
+        self._set_exposure(device, exposure_time)
+
         # Try GStreamer with hardware JPEG decoder first.
         gst_pipeline = (
-            f"v4l2src device={device} ! "
+            f"v4l2src device={device} extra-controls=\"c,auto_exposure=3\" ! "
             f"image/jpeg,width={width},height={height},framerate=30/1 ! "
             f"nvjpegdec ! nvvidconv ! "
             f"video/x-raw,format=BGRx ! videoconvert ! "
@@ -65,18 +68,20 @@ class CameraNode(Node):
             self.get_logger().info(
                 f'Camera opened via V4L2 (sw decode): {actual_w}x{actual_h} @ {actual_fps:.0f}fps')
 
-        self._set_exposure(device, exposure_time)
-
         self.pub = self.create_publisher(CompressedImage, '/camera/image_raw/compressed', 10)
         self.create_timer(1.0 / fps, self.capture)
 
     def _set_exposure(self, device, exposure_time):
         if exposure_time <= 0:
-            # Auto exposure
-            subprocess.run(
-                ['v4l2-ctl', f'--device={device}', '-c', 'auto_exposure=3'],
-                capture_output=True)
-            self.get_logger().info('Exposure: auto')
+            # Auto exposure — try multiple control names (varies by camera)
+            for ctrl in ['auto_exposure=3', 'exposure_auto=3',
+                         'auto_exposure=0', 'white_balance_automatic=1',
+                         'white_balance_temperature_auto=1',
+                         'backlight_compensation=1']:
+                subprocess.run(
+                    ['v4l2-ctl', f'--device={device}', '-c', ctrl],
+                    capture_output=True)
+            self.get_logger().info('Exposure: auto (all auto controls enabled)')
             return
         # Manual exposure: disable auto, then set absolute shutter speed
         r1 = subprocess.run(
