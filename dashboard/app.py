@@ -121,6 +121,7 @@ def start_ros2_bridge():
                     'type': 'metrics',
                     'data': state['metrics'],
                     'ros2': state['ros2_connected'],
+                    'mode': state['mode'],
                 }),
                 loop,
             )
@@ -713,6 +714,7 @@ function connect() {
     else if (msg.type === 'metrics') {
       updateMetrics(msg.data);
       if (msg.ros2 !== undefined) setRos2(msg.ros2);
+      if (msg.mode) setMode(msg.mode);
     }
     else if (msg.type === 'waypoints') {
       setWaypoints(msg.waypoints);
@@ -822,7 +824,7 @@ if (typeof L !== "undefined" && L !== null) {
     maxZoom: 19,
   }).addTo(map);
 } else {
-  document.getElementById("map").innerHTML = "<div style=\"display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px\">Map unavailable offline — GPS coordinates shown in metrics</div>";
+  document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable offline</div>';
 }
 
 // Car marker
@@ -938,6 +940,10 @@ async def main():
     print(f'  CREStE-Nano Dashboard running!')
     print(f'  Open on your phone: http://192.168.1.125:{PORT}')
     print(f'')
+
+    # Auto-launch data_collection mode so GPS + camera + teleop are live immediately
+    threading.Thread(target=start_mode, args=('data_collection',), daemon=True).start()
+    print('  Auto-starting data_collection mode...')
 
     await asyncio.Event().wait()
 
