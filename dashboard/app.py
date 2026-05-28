@@ -14,7 +14,7 @@ import yaml
 try:
     import rclpy
     from rclpy.node import Node as RclpyNode
-    from sensor_msgs.msg import NavSatFix
+    from sensor_msgs.msg import NavSatFix, CompressedImage
     from std_msgs.msg import Float64, Bool, String
     HAS_RCLPY = True
 except ImportError:
@@ -50,6 +50,7 @@ state = {
     },
     'waypoints': [],
     'ws_clients': set(),
+    'latest_jpeg': None,  # latest camera frame as JPEG bytes
 }
 
 # ── ROS2 Topic Bridge ────────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ def start_ros2_bridge():
             self.create_subscription(Bool, '/autonomous_mode', self.auto_cb, 10)
             self.create_subscription(Bool, '/recording', self.recording_cb, 10)
             self.create_subscription(String, '/intervention_stats', self.stats_cb, 10)
+            self.create_subscription(CompressedImage, '/camera/image_raw/compressed', self.cam_cb, 5)
             self._last_push = 0
 
             # Push metrics to WS clients at 2Hz
@@ -102,6 +104,9 @@ def start_ros2_bridge():
 
         def recording_cb(self, msg):
             state['metrics']['recording'] = msg.data
+
+        def cam_cb(self, msg):
+            state['latest_jpeg'] = bytes(msg.data)
 
         def stats_cb(self, msg):
             try:
@@ -255,6 +260,19 @@ def poll_metrics():
 async def handle_index(request):
     return web.Response(text=HTML, content_type='text/html')
 
+async def handle_stream(request):
+    resp = web.StreamResponse()
+    resp.content_type = 'multipart/x-mixed-replace; boundary=frame'
+    await resp.prepare(request)
+    while True:
+        jpeg = state.get('latest_jpeg')
+        if jpeg:
+            await resp.write(
+                b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n'
+            )
+        await asyncio.sleep(0.1)  # ~10fps
+
 async def handle_ws(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -329,8 +347,14 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CREStE-Nano Dashboard</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" onerror=""/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" onerror="window.L=null"></script>
+<script>
+  // On hotspot (10.42.0.x) skip Leaflet — no internet. On home WiFi, load it.
+  window.L = null;
+  if (location.hostname !== '10.42.0.1') {
+    document.write('<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>');
+    document.write('<scr'+'ipt src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/scr'+'ipt>');
+  }
+</script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -817,37 +841,40 @@ function appendLog(line) {
 
 // ── Map ───────────────────────────────────────────────────────────────────────
 let map = null;
-if (typeof L !== "undefined" && L !== null) {
+let carIcon = null;
+
+function initMap() {
+  if (typeof L === "undefined" || L === null) {
+    document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable offline — GPS in metrics</div>';
+    return;
+  }
   map = L.map("map").setView([30.5083, -97.6789], 17);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "OpenStreetMap",
     maxZoom: 19,
   }).addTo(map);
-} else {
-  document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable offline</div>';
+  carIcon = L.divIcon({
+    html: '<div style="font-size:24px;transform:translate(-50%,-50%)">🚗</div>',
+    iconSize: [0,0],
+    className: '',
+  });
+  map.on('click', (e) => {
+    const { lat, lng } = e.latlng;
+    send({ action: 'add_waypoint', lat, lon: lng });
+  });
 }
 
-// Car marker
-const carIcon = L.divIcon({
-  html: '<div style="font-size:24px;transform:translate(-50%,-50%)">🚗</div>',
-  iconSize: [0,0],
-  className: '',
-});
+// Init map after page loads (Leaflet loaded synchronously on home WiFi, skipped on hotspot)
+window.addEventListener('load', initMap);
 
 function updateCarPosition(lat, lon) {
-  if (!map) return;
+  if (!map || !carIcon) return;
   if (!carMarker) {
     carMarker = L.marker([lat, lon], { icon: carIcon }).addTo(map);
   } else {
     carMarker.setLatLng([lat, lon]);
   }
 }
-
-// Tap to add waypoints
-if (map) map.on('click', (e) => {
-  const { lat, lng } = e.latlng;
-  send({ action: 'add_waypoint', lat, lon: lng });
-});
 
 function setWaypoints(wps) {
   waypoints = wps;
@@ -857,13 +884,14 @@ function setWaypoints(wps) {
   waypointMarkers = [];
 
   wps.forEach((wp, i) => {
+    if (!map) return;
     const icon = L.divIcon({
       html: `<div style="background:#76c7ff;color:#000;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:11px;transform:translate(-50%,-50%)">${i+1}</div>`,
       iconSize: [0,0],
       className: '',
     });
     const marker = L.marker([wp.lat, wp.lon], { icon });
-    if (map) marker.addTo(map);
+    marker.addTo(map);
     waypointMarkers.push(marker);
   });
 
@@ -896,7 +924,7 @@ function centerOnCar() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-document.getElementById('cameraImg').src = 'http://' + location.hostname + ':8081/stream';
+document.getElementById('cameraImg').src = 'http://' + location.host + '/stream';
 connect();
 </script>
 </body>
@@ -910,6 +938,7 @@ loop = None
 async def create_app():
     app = web.Application()
     app.router.add_get('/', handle_index)
+    app.router.add_get('/stream', handle_stream)
     app.router.add_get('/ws', handle_ws)
     return app
 
