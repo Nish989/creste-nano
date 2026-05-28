@@ -63,7 +63,8 @@ class PWMControlNode(Node):
     def steering_cb(self, msg):
         val = int(1500 + (msg.data * 500))
         val = max(1000, min(2000, val))
-        if val != self._last_steer:
+        # Ignore changes smaller than 8µs to prevent servo jitter from analog noise
+        if abs(val - self._last_steer) >= 8:
             self._last_steer = val
             self._send(f'S{val}\n'.encode())
 
@@ -73,7 +74,7 @@ class PWMControlNode(Node):
         limit = max(-0.12, min(0.12, msg.data))
         val = int(1500 + (limit * 500))
         val = max(1000, min(2000, val))
-        if val != self._last_thr:
+        if abs(val - self._last_thr) >= 8:
             self._last_thr = val
             self._send(f'T{val}\n'.encode())
 
