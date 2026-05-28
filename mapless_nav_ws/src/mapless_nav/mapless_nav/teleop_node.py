@@ -23,6 +23,9 @@ class TeleopNode(Node):
         self.record_pub = self.create_publisher(Bool, '/record_toggle', 10)
         self.auto_mode_pub = self.create_publisher(Bool, '/autonomous_mode', 10)
 
+        # Dashboard can toggle autonomous mode without PS5 controller
+        self.create_subscription(Bool, '/set_autonomous', self._set_auto_cb, 10)
+
         self.estop_active = False
         self.autonomous_mode = False
         self._estop_btn_prev = False
@@ -44,6 +47,15 @@ class TeleopNode(Node):
             self._retry_timer = self.create_timer(2.0, self._try_connect)
 
         self.create_timer(0.02, self._publish)
+
+    def _set_auto_cb(self, msg):
+        if msg.data != self.autonomous_mode:
+            self.autonomous_mode = msg.data
+            self.auto_mode_pub.publish(Bool(data=self.autonomous_mode))
+            if self.autonomous_mode:
+                self.get_logger().warn('AUTONOMOUS MODE ON (dashboard)')
+            else:
+                self.get_logger().info('Manual mode (dashboard)')
 
     def _try_connect(self):
         for path in evdev.list_devices():

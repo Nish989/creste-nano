@@ -306,8 +306,21 @@ async def handle_ws_message(ws, data):
         mode = data.get('mode')
         threading.Thread(target=start_mode, args=(mode,), daemon=True).start()
         await broadcast({'type': 'mode', 'mode': mode})
+        # Tell teleop_node to enter autonomous mode (no PS5 needed)
+        if mode == 'autonomous':
+            subprocess.Popen(
+                f'bash -c "source {WS_DIR}/install/setup.bash && '
+                f'ros2 topic pub --once /set_autonomous std_msgs/msg/Bool data:\\ true"',
+                shell=True
+            )
 
     elif action == 'stop':
+        # Tell teleop_node to exit autonomous mode
+        subprocess.Popen(
+            f'bash -c "source {WS_DIR}/install/setup.bash && '
+            f'ros2 topic pub --once /set_autonomous std_msgs/msg/Bool data:\\ false"',
+            shell=True
+        )
         threading.Thread(target=stop_current, daemon=True).start()
         await broadcast({'type': 'mode', 'mode': 'idle'})
 
@@ -775,7 +788,6 @@ function setMode(mode) {
   const pill = document.getElementById('statusPill');
   pill.className = `status-pill status-${mode}`;
   pill.textContent = mode.replace('_', ' ').toUpperCase();
-  document.getElementById('val-mode').textContent = mode.replace('_',' ').toUpperCase();
 
   // Highlight active button
   document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
