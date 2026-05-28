@@ -1,9 +1,3 @@
-"""
-Data Recorder Node - Records synchronized camera, GPS, heading, and command data
-for training the reward model. Saves to timestamped directories.
-
-Triangle toggles recording on/off. Publishes state on /recording for LED feedback.
-"""
 import queue
 import threading
 import time
@@ -64,7 +58,7 @@ class DataRecorderNode(Node):
         self.get_logger().info(f'Data recorder ready. Press Triangle to start recording. Output: {self.output_dir}')
 
     def _writer_loop(self):
-        """Background thread: pulls (path, frame, metadata_line) and writes to disk."""
+
         while True:
             item = self._write_queue.get()
             if item is None:
@@ -101,7 +95,7 @@ class DataRecorderNode(Node):
             self._start_wiggle()
 
     def _start_wiggle(self):
-        """Sweep steering full right → full left → center in a background thread, then start recording."""
+
         if self._wiggle_thread is not None and self._wiggle_thread.is_alive():
             return
         self._wiggle_thread = threading.Thread(target=self._wiggle_sequence, daemon=True)

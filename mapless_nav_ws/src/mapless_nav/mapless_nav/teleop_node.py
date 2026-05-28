@@ -1,11 +1,3 @@
-"""
-Teleop Node - Reads DualSense gamepad via evdev and publishes steering/throttle.
-Publishes to /cmd_steering and /cmd_throttle (Float64, -1.0 to 1.0).
-Square button is kill switch (e-stop toggle).
-Triangle button toggles data recording.
-Circle button toggles autonomous mode.
-Options button held 3s cleanly shuts down the entire launch.
-"""
 import os
 import signal
 import time

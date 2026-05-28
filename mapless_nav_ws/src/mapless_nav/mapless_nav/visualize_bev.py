@@ -1,12 +1,3 @@
-"""
-Visualize BEV maps and point clouds from recorded training data.
-
-Runs DINOv2 + Depth Anything V2 on saved images, projects to both
-training BEV (spatial resize) and depth-projected BEV, and saves
-visualizations for sanity-checking the pipeline.
-
-Usage: python3 -m mapless_nav.visualize_bev --data_dir ~/mapless_nav_data
-"""
 import argparse
 import os
 import sys
@@ -57,7 +48,6 @@ def preprocess(frame, size, device):
 
 
 def load_models(model_dir, device):
-    """Load DINOv2-small and Depth Anything V2 small."""
     # DINOv2
     dino_path = os.path.join(model_dir, 'dinov2_small', 'dinov2_vits14.pth')
     if os.path.exists(dino_path):
@@ -89,7 +79,6 @@ def load_models(model_dir, device):
 
 
 def training_bev(patches):
-    """BEV as used in train_reward.py: spatial resize of DINOv2 patches to 64x64."""
     n = int(np.sqrt(patches.shape[0]))  # 37
     spatial = patches.reshape(n, n, -1)
     bev = np.zeros((BEV_H, BEV_W, 384), dtype=np.float32)
@@ -99,7 +88,6 @@ def training_bev(patches):
 
 
 def depth_projected_bev(patches, depth_u8, angles_h, angles_v):
-    """BEV as used in bev_projection_node.py: depth-based 3D projection."""
     n = N_PATCHES
     bev = np.zeros((BEV_H, BEV_W, 384), dtype=np.float32)
     counts = np.zeros((BEV_H, BEV_W), dtype=np.float32)
@@ -141,7 +129,6 @@ def depth_projected_bev(patches, depth_u8, angles_h, angles_v):
 
 
 def pca_rgb(bev, mask=None):
-    """PCA of BEV features → RGB image for semantic visualization."""
     if mask is None:
         mask = np.linalg.norm(bev, axis=2) > 0
 
@@ -199,7 +186,6 @@ def upscale(img, size=384):
 
 
 def add_label(img, text):
-    """Add a label bar above the image."""
     h, w = img.shape[:2]
     bar = np.zeros((30, w, 3), dtype=np.uint8)
     cv2.putText(bar, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)

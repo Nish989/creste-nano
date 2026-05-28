@@ -1,10 +1,3 @@
-"""
-Waypoint Manager Node - Loads a route YAML file, tracks progress through
-waypoints, and publishes bearing/distance to current target waypoint.
-
-Input: /gps/fix, /gps/course (GPS motion heading)
-Output: /waypoint/bearing, /waypoint/distance, /waypoint/index
-"""
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix
@@ -92,7 +85,7 @@ class WaypointManagerNode(Node):
         self.get_logger().info(f'Saved {len(self.waypoints)} waypoints to {path}')
 
     def save_waypoint_cb(self, msg):
-        """Save current GPS position as a waypoint."""
+
         if self.current_lat is None:
             self.get_logger().warn('No GPS fix, cannot save waypoint')
             return

@@ -1,8 +1,3 @@
-"""
-Safety Node - Monitors command streams and enforces safety constraints.
-If no commands received within timeout, sends zero (stop).
-Listens for /estop to kill all motion.
-"""
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64, Bool

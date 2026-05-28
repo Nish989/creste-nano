@@ -1,7 +1,3 @@
-"""
-GPS Node - Reads UBX binary from HGLRC M100 Pro (u-blox) over UART.
-Publishes NavSatFix to /gps/fix and speed/course to /gps/speed, /gps/course.
-"""
 import struct
 
 import rclpy
@@ -70,7 +66,6 @@ class GPSNode(Node):
             self.buf = self.buf[-512:]
 
     def _parse_ubx(self):
-        """Extract one UBX message from self.buf. Returns (cls, id, payload) or None."""
         # Find sync header 0xB5 0x62
         while len(self.buf) >= 2:
             if self.buf[0] == 0xB5 and self.buf[1] == 0x62:
@@ -108,7 +103,6 @@ class GPSNode(Node):
         return cls, msg_id, payload
 
     def _handle_nav_pvt(self, payload):
-        """Parse UBX-NAV-PVT and publish fix + velocity."""
         if len(payload) < 92:
             return
 

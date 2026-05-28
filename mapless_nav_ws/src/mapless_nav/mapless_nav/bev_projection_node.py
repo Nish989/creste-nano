@@ -1,10 +1,3 @@
-"""
-BEV Projection Node - Projects DINOv2 patch features into a bird's eye view
-grid using depth estimates, following the CREStE paradigm.
-
-Input: /perception/features (DINOv2 patches) + /perception/depth
-Output: /bev/features (BEV feature grid)
-"""
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -67,7 +60,7 @@ class BEVProjectionNode(Node):
             f'{self.bev_h * self.bev_res:.1f}m coverage')
 
     def _precompute_patch_rays(self):
-        """Compute the ray direction for each DINOv2 patch center."""
+
         n = self.patches_per_side
         px = np.arange(n)
         py = np.arange(n)

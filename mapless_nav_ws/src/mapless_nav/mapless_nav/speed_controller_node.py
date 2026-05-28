@@ -1,8 +1,3 @@
-"""
-Speed Controller Node - Closed-loop PID speed control using GPS velocity feedback.
-Subscribes to /cmd_speed (target m/s) and /gps/speed (actual m/s).
-Publishes /cmd_throttle (Float64, -1.0 to 1.0) for the safety node.
-"""
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64

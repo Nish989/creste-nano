@@ -1,13 +1,3 @@
-"""
-Camera Node - Captures frames from USB webcam and publishes as CompressedImage.
-Uses GStreamer with Jetson hardware JPEG decoder (nvjpegdec) to keep CPU usage low.
-Falls back to OpenCV V4L2 software decoding if GStreamer fails.
-
-Publishes to /camera/image_raw/compressed (JPEG, ~30-50KB/frame vs 921KB raw BGR).
-This keeps DDS message sizes small and achieves reliable 30fps over ROS2 transport.
-
-Exposure: manual mode with configurable shutter speed to reduce motion blur.
-"""
 import subprocess
 import rclpy
 from rclpy.node import Node

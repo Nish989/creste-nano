@@ -1,16 +1,3 @@
-"""
-Precompute BEV features from recorded driving sessions.
-
-Runs DINOv2 + Depth Anything V2 on each frame, then does depth-based BEV
-projection matching the runtime bev_projection_node exactly.
-
-Run on Mac:
-  scp -r nishan@192.168.1.125:~/mapless_nav_data/raw ./raw_data
-  python3 precompute_bev.py --data_dir ./raw_data
-
-Then train:
-  python3 train_reward.py --data_dir ./raw_data/bev_features
-"""
 import argparse
 import os
 import sys
@@ -25,7 +12,6 @@ import torch
 
 
 def precompute_patch_rays(n, fov_h, fov_v, cam_pitch):
-    """Compute ray directions for each DINOv2 patch — matches bev_projection_node."""
     px = np.arange(n)
     py = np.arange(n)
     px_grid, py_grid = np.meshgrid(px, py)
@@ -38,7 +24,6 @@ def precompute_patch_rays(n, fov_h, fov_v, cam_pitch):
 
 def project_to_bev(features, depth_u8, angles_h, angles_v, n,
                     bev_h=64, bev_w=64, bev_res=0.15, depth_py=None, depth_px=None):
-    """Project DINOv2 patches to BEV grid using depth — vectorized, matches bev_projection_node."""
     feat_dim = features.shape[1]
     depth_h, depth_w = depth_u8.shape
 

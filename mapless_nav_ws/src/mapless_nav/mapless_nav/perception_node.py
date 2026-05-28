@@ -1,10 +1,3 @@
-"""
-Perception Node - Runs DINOv2-small and Depth Anything V2 small on camera images.
-Publishes DINOv2 feature maps and depth maps for BEV projection.
-
-Uses TensorRT for optimized inference on Jetson Orin Nano.
-Falls back to PyTorch if TRT engines not found.
-"""
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CompressedImage
@@ -51,7 +44,7 @@ class PerceptionNode(Node):
         self.last_log_time = time.time()
 
     def _load_models(self):
-        """Load DINOv2-small and Depth Anything V2 small."""
+
         try:
             import torch
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -72,7 +65,7 @@ class PerceptionNode(Node):
             self._load_pytorch()
 
     def _load_pytorch(self):
-        """Load models via PyTorch (slower, used before TRT conversion)."""
+
         import torch
         import sys
 
@@ -117,7 +110,7 @@ class PerceptionNode(Node):
         self.get_logger().info('Depth Anything V2 small loaded (PyTorch)')
 
     def _load_tensorrt(self, dino_path, depth_path):
-        """Load TensorRT engines for maximum performance."""
+
         try:
             import tensorrt as trt
 
@@ -155,7 +148,7 @@ class PerceptionNode(Node):
             self._load_pytorch()
 
     def _trt_infer_dino(self, input_tensor):
-        """Run DINOv2 inference via TensorRT using torch GPU tensors as bindings."""
+
         self.trt_dino_input.copy_(input_tensor)
         self.dino_context.set_tensor_address('input', self.trt_dino_input.data_ptr())
         self.dino_context.set_tensor_address('patch_tokens', self.trt_dino_output.data_ptr())
@@ -165,7 +158,7 @@ class PerceptionNode(Node):
         return self.trt_dino_output  # [1, N, 384]
 
     def _trt_infer_depth(self, input_tensor):
-        """Run Depth Anything V2 inference via TensorRT."""
+
         self.trt_depth_input.copy_(input_tensor)
         self.depth_context.set_tensor_address('input', self.trt_depth_input.data_ptr())
         self.depth_context.set_tensor_address('depth', self.trt_depth_output.data_ptr())
@@ -175,7 +168,7 @@ class PerceptionNode(Node):
         return self.trt_depth_output  # [1, 1, H, W]
 
     def _preprocess(self, frame, size):
-        """Preprocess image for model input."""
+
         import torch
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (size, size))

@@ -1,7 +1,3 @@
-"""
-Compass Node - Reads heading from QMC5883L magnetometer over I2C.
-Publishes heading in degrees (0-360, 0=North) to /compass/heading.
-"""
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64

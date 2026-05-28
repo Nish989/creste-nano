@@ -1,14 +1,3 @@
-"""
-Export DINOv2-small and Depth Anything V2 small to TensorRT engines.
-
-Pipeline: PyTorch → ONNX → trtexec → .engine
-
-Usage:
-  python3 -m mapless_nav.export_tensorrt
-  python3 -m mapless_nav.export_tensorrt --fp16   # recommended for Jetson
-
-Requires: torch, onnx, tensorrt (via trtexec)
-"""
 import argparse
 import os
 import sys
@@ -21,7 +10,6 @@ INPUT_SIZE = 518
 
 
 def export_dino_onnx(model_dir, onnx_path, device):
-    """Export DINOv2-small to ONNX."""
     print('=== Exporting DINOv2-small to ONNX ===')
     pth_path = os.path.join(model_dir, 'dinov2_small', 'dinov2_vits14.pth')
 
@@ -54,7 +42,6 @@ def export_dino_onnx(model_dir, onnx_path, device):
 
 
 def export_depth_onnx(model_dir, onnx_path, device):
-    """Export Depth Anything V2 small to ONNX."""
     print('=== Exporting Depth Anything V2 small to ONNX ===')
     pth_path = os.path.join(model_dir, 'depth_anything_v2_small', 'depth_anything_v2_vits.pth')
     da2_repo = os.path.join(model_dir, 'depth_anything_v2_small', 'Depth-Anything-V2')
@@ -80,7 +67,6 @@ def export_depth_onnx(model_dir, onnx_path, device):
 
 
 def onnx_to_engine(onnx_path, engine_path, fp16=True):
-    """Convert ONNX to TensorRT engine via trtexec."""
     print(f'=== Building TensorRT engine: {os.path.basename(engine_path)} ===')
     cmd = [
         TRTEXEC,
