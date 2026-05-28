@@ -12,8 +12,10 @@ class TeleopNode(Node):
     def __init__(self):
         super().__init__('teleop_node')
 
-        self.declare_parameter('deadzone', 0.05)
+        self.declare_parameter('deadzone', 0.12)
+        self.declare_parameter('steering_smoothing', 0.4)  # 0=no smoothing, 1=max smoothing
         self.deadzone = self.get_parameter('deadzone').value
+        self.smoothing = self.get_parameter('steering_smoothing').value
 
         self.steer_pub = self.create_publisher(Float64, '/cmd_steering', 10)
         self.thr_pub = self.create_publisher(Float64, '/cmd_throttle', 10)
@@ -154,6 +156,10 @@ class TeleopNode(Node):
         steer = self.steering
         if abs(steer) < self.deadzone:
             steer = 0.0
+        # Smooth steering to reduce jitter
+        self._smooth_steer = getattr(self, '_smooth_steer', 0.0)
+        self._smooth_steer = self.smoothing * self._smooth_steer + (1 - self.smoothing) * steer
+        steer = self._smooth_steer
 
         thr = self.throttle if self.throttle >= self.deadzone else 0.0
         brk = self.brake if self.brake >= self.deadzone else 0.0

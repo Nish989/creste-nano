@@ -150,6 +150,7 @@ LAUNCH_COMMANDS = {
 
 def start_mode(mode):
     stop_current()
+    time.sleep(2)  # let camera device release before restarting
     if mode not in LAUNCH_COMMANDS:
         return
 
@@ -664,6 +665,9 @@ HTML = """<!DOCTYPE html>
   <div class="card span2">
     <h2>📍 GPS Route Planner — tap map to add waypoints</h2>
     <div id="map"></div>
+    <div id="gpsCoords" style="padding:10px;text-align:center;font-size:14px;color:#76c7ff;display:none">
+      <span id="gpsText">Waiting for GPS fix...</span>
+    </div>
     <div class="map-controls">
       <button class="map-btn" onclick="clearWaypoints()">🗑️ Clear Waypoints</button>
       <button class="map-btn" onclick="centerOnCar()">🎯 Center on Car</button>
@@ -808,9 +812,17 @@ function updateMetrics(m) {
   document.getElementById('val-steering').textContent =
     m.steering !== undefined ? m.steering.toFixed(2) : '0.0';
 
-  // Update car position on map
+  // Update car position on map + show GPS coords when map unavailable
   if (m.gps_lat && m.gps_lon) {
     updateCarPosition(m.gps_lat, m.gps_lon);
+    if (!map) {
+      var el = document.getElementById('gpsCoords');
+      el.style.display = 'block';
+      document.getElementById('gpsText').textContent =
+        '📍 ' + m.gps_lat.toFixed(6) + ', ' + m.gps_lon.toFixed(6) +
+        '  |  🧭 ' + Math.round(m.heading || 0) + '°' +
+        '  |  🏎️ ' + (m.speed || 0).toFixed(1) + ' m/s';
+    }
   }
 
   // Color NIR
