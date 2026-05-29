@@ -1,0 +1,14 @@
+[Unit]
+Description=CREStE-Nano Dashboard + ROS2 Nodes
+After=network.target
+
+[Service]
+Type=simple
+User=nishan
+Environment="HOME=/home/nishan"
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source /home/nishan/mapless_nav_ws/install/setup.bash && cd /home/nishan/dashboard && python3 app.py'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

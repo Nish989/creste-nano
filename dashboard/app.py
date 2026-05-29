@@ -199,11 +199,15 @@ def stop_current():
         add_log('[DASHBOARD] Stopped current mode')
     state['process'] = None
     state['mode'] = 'idle'
+    # Clear camera frame cache so feed goes dark instead of freezing on old frame
+    state['latest_jpeg'] = None
     # Kill any stray ROS2 nodes left over from previous sessions
     subprocess.run(
         ['pkill', '-f', 'mapless_nav/(camera|gps|teleop|pwm|safety|data_recorder|waypoint|perception|bev|reward|planner|speed|intervention)'],
         capture_output=True
     )
+    # Also kill any stray ros2 launch processes from previous direct SSH launches
+    subprocess.run(['pkill', '-f', 'ros2 launch mapless_nav'], capture_output=True)
     time.sleep(1)
 
 def add_log(line):

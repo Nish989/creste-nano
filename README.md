@@ -1,14 +1,29 @@
 # CREStE-Nano
 
-A $500 autonomous RC car that drives to GPS waypoints without a map. Built as independent research to extend [CREStE (RSS 2025)](https://amrl.cs.utexas.edu/creste/) from Prof. Joydeep Biswas's lab at UT Austin onto ultra-low-cost hardware.
+**A $500 autonomous RC car that drives to GPS waypoints without a map.**
+Independent research extending [CREStE (RSS 2025)](https://amrl.cs.utexas.edu/creste/) from Prof. Joydeep Biswas's lab at UT Austin to ultra-low-cost hardware.
 
-The robot learns what terrain looks like from 20-30 minutes of human driving, then navigates on its own using only a webcam and GPS.
+The robot learns what terrain looks like from ~20 minutes of human driving, then navigates on its own using only a webcam and GPS — no LiDAR, no HD map.
+
+---
+
+## 🎥 Demo
+
+**▶ [Watch the demo video (demo.mp4)](demo.mp4)** &nbsp;·&nbsp; 500 frames replayed at native 10 Hz showing live camera, BEV traversability heatmap, MPPI candidate trajectories, and selected path.
+
+<p align="center">
+  <video src="demo.mp4" controls width="720" muted autoplay loop>
+    Your browser doesn't render embedded video — click the link above to view <code>demo.mp4</code>.
+  </video>
+</p>
+
+The demo shows the full perception → planning pipeline running on real recorded camera frames from Sauls Ranch, Round Rock TX. The viridis BEV overlay is the trained UNet's traversability prediction; the red curve is the MPPI-selected trajectory among 1000 candidates.
 
 ---
 
 ## The Research Question
 
-CREStE achieved 2km mapless navigation on a $10,000 Clearpath Jackal with LiDAR. This project asks: **does the same paradigm work on $500 hardware with monocular depth instead of LiDAR?** Nobody has studied this tradeoff.
+CREStE achieved 2 km mapless navigation on a $10,000 Clearpath Jackal with LiDAR. This project asks: **does the same paradigm work on $500 hardware with monocular depth instead of LiDAR?** Nobody has studied this tradeoff.
 
 ---
 
@@ -55,27 +70,67 @@ Camera → DINOv2 + Depth Anything V2 → BEV grid → reward model → MPPI pla
 
 ## Results
 
-| | CREStE (RSS 2025) | Ours |
-|--|---|---|
-| Cost | ~$10,000 | ~$500 |
-| Depth sensor | LiDAR | Monocular |
-| NIR (interventions/100m) | 0.05 | TBD |
+### Trained reward model (TraversabilityUNet)
 
-*Results pending outdoor evaluation*
+The traversability head — a 384→1 UNet operating on the 64×64 BEV feature grid — was trained on 8,331 frames of human driving data collected from sidewalks around Sauls Ranch, Round Rock, TX.
+
+| Metric | Value |
+|--------|-------|
+| Training frames | **8,331** |
+| Validation correlation on turns (`corr_turns`) | **0.914** |
+| BEV grid | 64 × 64 (9.6 m × 9.6 m, 15 cm/cell) |
+| Feature dim per cell | 384 (DINOv2 ViT-S/14) |
+| UNet params | ~8 M |
+| Inference rate on Jetson Orin Nano | ~5 FPS |
+| MPPI samples per planning step | 1000 |
+| Planning horizon | 8 steps (~1.8 m lookahead) |
+
+`corr_turns = 0.914` means the UNet's predicted traversability gradient correctly indicates the human-driven steering direction on validation turns — the model has learned a meaningful semantic mapping from DINOv2 features to drivability, not a color shortcut.
+
+### Comparison to baseline
+
+| | CREStE (RSS 2025) | CREStE-Nano (ours) |
+|--|---|---|
+| Hardware cost | ~$10,000 | **~$500** (20× cheaper) |
+| Depth sensor | Velodyne VLP-16 LiDAR | Monocular RGB + Depth Anything V2 |
+| Compute | Jetson AGX Xavier (32 GB) | **Jetson Orin Nano (8 GB)** |
+| Reward model | InfoNCE contrastive (256-dim) | TraversabilityUNet (384→1 spatial) |
+| Demonstrated NIR | 0.05 / 100 m | Pending outdoor weather window |
+
+### Field testing status
+
+The hardware-integrated end-to-end stack — camera capture, DINOv2 perception, BEV projection, UNet scoring, MPPI planning, safety-watchdogged PWM output — runs at the target rate on the actual car. ESC arms, all 13 ROS 2 nodes launch cleanly, and the closed-loop pipeline is verified on indoor bench tests (wheels turning to predicted steering on recorded sidewalk frames).
+
+**Outdoor NIR measurement is pending a clear-weather test window.** The Sauls Ranch test loop was rained out during the planned evaluation day. The demo video above shows the trained model's decisions on real recorded data from the same site; the next step is logging a continuous autonomous run for NIR.
 
 ---
 
 ## Setup
 
-```bash
-# SSH into Jetson
-ssh nishan@192.168.1.125
+### One-shot launch (recommended)
 
+A helper script handles the full launch and triggers autonomous mode without dashboard dependency:
+
+```bash
+ssh nishan@192.168.1.125
+~/drive.sh
+```
+
+This:
+1. Kills any stale ROS 2 processes
+2. Launches all 13 nodes via `ros2 launch mapless_nav autonomous_launch.py`
+3. Waits 12 s for the ESC arming sequence (5 retries of neutral PWM)
+4. Publishes `/autonomous_mode true` directly to the planner
+5. Holds the autonomous signal until `Ctrl+C` (which sends `false` and shuts down cleanly)
+
+### Manual / per-stage workflow
+
+```bash
 # Build
-cd ~/mapless_nav_ws && colcon build
+cd ~/mapless_nav_ws && colcon build --packages-select mapless_nav
 source install/setup.bash
 
-# Teleop (test hardware)
+# Teleop (test hardware with PS5 controller)
 ros2 launch mapless_nav teleop_launch.py
 
 # Collect training data
@@ -84,13 +139,24 @@ ros2 launch mapless_nav data_collection_launch.py
 # Precompute BEV features (on Jetson)
 python3 -m mapless_nav.precompute_bev --data_dir ~/mapless_nav_data
 
-# Train reward model (on Mac/GPU)
+# Train reward model (on Mac / GPU)
 python3 train_reward.py --data_dir ./bev_features
 
 # Autonomous mode
 ros2 launch mapless_nav autonomous_launch.py
+```
 
-# Web dashboard (open phone at http://192.168.1.125:8080)
+### Web dashboard (phone-friendly)
+
+A self-hosted dashboard runs on the Jetson at `http://192.168.1.125:8080` (or `http://10.42.0.1:8080` on the on-board hotspot):
+
+- Start / Stop / E-stop buttons (no PS5 controller required)
+- Live MJPEG camera feed (snapshot-polled for Safari compatibility)
+- Leaflet map with tap-to-add waypoints
+- Live ROS 2 log stream via WebSocket
+- Steering / interventions / autonomous-distance metrics
+
+```bash
 python3 ~/dashboard/app.py
 ```
 

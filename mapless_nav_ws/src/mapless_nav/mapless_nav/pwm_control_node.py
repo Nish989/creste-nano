@@ -47,15 +47,21 @@ class PWMControlNode(Node):
             self.ser = None
 
         self.armed = False
-        self._arm_timer = self.create_timer(3.0, self._finish_arming)
+        self._arm_start = time.time()
+        # Keep pinging neutral every 0.5s for 5s so ESC catches it even if
+        # it was powered on AFTER the launch started.
+        self._arm_timer = self.create_timer(0.5, self._arm_tick)
         self.create_subscription(Float64, '/safe_cmd_steering', self.steering_cb, 10)
         self.create_subscription(Float64, '/safe_cmd_throttle', self.throttle_cb, 10)
         self.create_subscription(Bool, '/recording', self.recording_cb, 10)
 
-    def _finish_arming(self):
-        self.armed = True
-        self.get_logger().info('--- ESC ARMED: READY FOR DATA COLLECTION ---')
-        self._arm_timer.cancel()
+    def _arm_tick(self):
+        # Send neutral repeatedly so a late-powered ESC sees a stable signal
+        self._send(b'N\n')
+        if time.time() - self._arm_start >= 5.0:
+            self.armed = True
+            self.get_logger().info('--- ESC ARMED: READY FOR DRIVING ---')
+            self._arm_timer.cancel()
 
     def _send(self, cmd):
         if self.ser and self.ser.is_open:

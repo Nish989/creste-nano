@@ -95,3 +95,28 @@ snapshot.jpg
 test_cam.jpg
 train_log.txt
 train_traversability_log.txt
+
+# Root-level scratch hardware-bench scripts (one-off, not part of the stack)
+/test_esc_arm.py
+/test_gps.py
+/test_pwm.py
+/test_teleop.py
+/test_throttle.py
+/pwm_test.py
+
+# Large demo source files (only the polished demo.mp4 is tracked)
+demo_final.mp4
+demo_preview.mp4
+demo_preview2.mp4
+
+# Kernel module build artifacts (only .ino / Makefile / .c worth tracking)
+hid-playstation/*.o
+hid-playstation/*.ko
+hid-playstation/*.mod
+hid-playstation/*.mod.c
+hid-playstation/.*.cmd
+hid-playstation/modules.order
+hid-playstation/Module.symvers
+
+# Workspace local binaries
+mapless_nav_ws/bin/
