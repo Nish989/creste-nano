@@ -212,6 +212,57 @@ def draw_filled_path(img, path_bev, color):
     cv2.fillPoly(overlay, [pts_all], color)
     cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
 
+# ── Score → colour (red=bad, green=ok, cyan=best) ─────────────────────────────
+def score_to_bgr(s):
+    """Map normalized score in [0,1] to BGR (red→orange→yellow→green→cyan)."""
+    s = float(np.clip(s, 0.0, 1.0))
+    if s < 0.25:
+        # red → orange
+        t = s / 0.25
+        b, g, r = 0, int(120 * t), 255
+    elif s < 0.5:
+        # orange → yellow
+        t = (s - 0.25) / 0.25
+        b, g, r = 0, int(120 + 135 * t), 255
+    elif s < 0.75:
+        # yellow → green
+        t = (s - 0.5) / 0.25
+        b, g, r = 0, 255, int(255 - 200 * t)
+    else:
+        # green → cyan
+        t = (s - 0.75) / 0.25
+        b, g, r = int(255 * t), 255, int(55 * (1 - t))
+    return (b, g, r)
+
+# ── Draw ALL candidate rollouts on the camera image ───────────────────────────
+def draw_all_rollouts_camera(img, candidates, scores_norm, best_k,
+                             max_draw=300, alpha=0.55):
+    """Draw a sampled subset of MPPI rollouts on the camera image, coloured by score.
+    Worst paths drawn first (under), best paths drawn last (over)."""
+    overlay = img.copy()
+    K = candidates.shape[0]
+    # Sort by score ascending so high-score paths render on top
+    order = np.argsort(scores_norm)
+    # Subsample evenly across the score range for visual diversity
+    if K > max_draw:
+        idx = order[np.linspace(0, K-1, max_draw).astype(int)]
+    else:
+        idx = order
+    for k in idx:
+        if k == best_k:
+            continue  # best path drawn separately on top
+        pts = []
+        for j in range(candidates.shape[1]):
+            uv = bev_to_img(candidates[k, j, 0], candidates[k, j, 1])
+            if uv:
+                pts.append(uv)
+        if len(pts) < 2:
+            continue
+        col = score_to_bgr(scores_norm[k])
+        for j in range(1, len(pts)):
+            cv2.line(overlay, pts[j-1], pts[j], col, 1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
 # ── Viridis LUT (matches simulate.py cmap='viridis') ─────────────────────────
 _VIRIDIS_LUT = None
 def _viridis(arr_u8):
@@ -270,34 +321,60 @@ def _viridis(arr_u8):
     return _VIRIDIS_LUT[arr_u8]
 
 
-# ── BEV inset ─────────────────────────────────────────────────────────────────
-def make_bev_inset(bev, cands, scores, best_k, size=200, heatmap=None):
-    """Clean viridis BEV — same look as the simulator."""
+# ── BEV inset (now larger, with rollouts overlaid on traversability heatmap) ──
+def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
+                   max_draw=300):
+    """CREStE-style BEV panel: traversability heatmap background with all rollouts
+    coloured by score, best path in bright cyan. heatmap should be the UNet pixel
+    map (HxW, sigmoid 0..1).  Falls back to DINOv2 feature norm if heatmap is None."""
 
-    # Feature-norm map (matches simulate.py exactly)
-    bev_vis = np.linalg.norm(bev, axis=2)
-    bev_vis = (bev_vis - bev_vis.min()) / (bev_vis.max() - bev_vis.min() + 1e-8)
+    # Background: use UNet traversability if available, otherwise feature norm
+    if heatmap is not None:
+        bg = heatmap.astype(np.float32)
+    else:
+        bg = np.linalg.norm(bev, axis=2).astype(np.float32)
+    bg = (bg - bg.min()) / (bg.max() - bg.min() + 1e-8)
 
-    # Bicubic upsample so it doesn't look pixelated at 200×200
-    bev_up = cv2.resize(bev_vis.astype(np.float32), (size, size), interpolation=cv2.INTER_CUBIC)
-    bev_u8 = (np.clip(bev_up, 0, 1) * 255).astype(np.uint8)
+    bg_up = cv2.resize(bg, (size, size), interpolation=cv2.INTER_CUBIC)
+    bg_u8 = (np.clip(bg_up, 0, 1) * 255).astype(np.uint8)
+    inset = _viridis(bg_u8)
 
-    # Viridis colormap (dark purple→teal→yellow, same as matplotlib viridis)
-    inset = _viridis(bev_u8)
+    # Darken slightly so coloured rollouts pop
+    inset = (inset.astype(np.float32) * 0.72).clip(0, 255).astype(np.uint8)
 
-    # Best path in red (matches simulate.py 'r-' line)
+    # Draw all rollouts in BEV space, colour-coded by score
     scale = size / 128.0
+    K = cands.shape[0]
+    order = np.argsort(scores_norm)
+    if K > max_draw:
+        idx = order[np.linspace(0, K-1, max_draw).astype(int)]
+    else:
+        idx = order
+
+    overlay = inset.copy()
+    for k in idx:
+        if k == best_k:
+            continue
+        pts = [(int(cands[k, j, 1] * scale), int(cands[k, j, 0] * scale))
+               for j in range(cands.shape[1])]
+        col = score_to_bgr(scores_norm[k])
+        for j in range(len(pts) - 1):
+            cv2.line(overlay, pts[j], pts[j+1], col, 1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.85, inset, 0.15, 0, inset)
+
+    # Best path in bright cyan, drawn thick on top
     bpts = [(int(cands[best_k, j, 1] * scale), int(cands[best_k, j, 0] * scale))
             for j in range(cands.shape[1])]
     for j in range(len(bpts) - 1):
-        cv2.line(inset, bpts[j], bpts[j+1], (0, 0, 220), 2, cv2.LINE_AA)  # red in BGR
+        cv2.line(inset, bpts[j], bpts[j+1], (255, 255, 80), 3, cv2.LINE_AA)   # bright cyan
+    cv2.line(inset, bpts[0], bpts[0], (255, 255, 255), 5, cv2.LINE_AA)
 
-    # Car dot at bottom centre
-    cv2.circle(inset, (size // 2, size - 4), 4, (255, 255, 255), -1)
-    cv2.circle(inset, (size // 2, size - 4), 4, (0, 0, 0), 1)
+    # Car dot at bottom centre (red, like CREStE)
+    cv2.circle(inset, (size // 2, size - 6), 6, (0, 0, 220), -1)
+    cv2.circle(inset, (size // 2, size - 6), 6, (255, 255, 255), 1)
 
-    # Thin dark border
-    cv2.rectangle(inset, (0, 0), (size-1, size-1), (50, 50, 50), 1)
+    # Subtle dark border
+    cv2.rectangle(inset, (0, 0), (size-1, size-1), (40, 40, 40), 1)
 
     return inset
 
@@ -335,6 +412,8 @@ def run(args):
     writer  = cv2.VideoWriter(args.out, fourcc, args.fps, (IMG_W, IMG_H))
 
     steer_h, planner_h = [], []
+    BEV_PANEL = 320   # BEV inset edge length (was 200)
+    BEV_MARGIN = 14
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
@@ -356,52 +435,105 @@ def run(args):
         best_k  = np.argmax(scores)
         steer   = planner.update(scores, eps)
 
+        # Normalize scores to [0,1] for colouring (so reds/cyans always span)
+        s_min, s_max = scores.min(), scores.max()
+        scores_norm = (scores - s_min) / (s_max - s_min + 1e-8)
+
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Camera overlay: filled corridor + glowing centreline ─────────────
-        draw_filled_path(img, cands[best_k], (0, 180, 80))
-        draw_path_on_image(img, cands[best_k], (40, 255, 130), thickness=5, alpha=0.95)
+        # ── Camera overlay: all 1000 rollouts coloured by score ──────────────
+        draw_all_rollouts_camera(img, cands, scores_norm, best_k,
+                                 max_draw=300, alpha=0.55)
+        # Filled corridor + bright cyan centreline for chosen path on top
+        draw_filled_path(img, cands[best_k], (255, 200, 60))
+        draw_path_on_image(img, cands[best_k], (255, 255, 80), thickness=5, alpha=0.95)
 
-        # ── BEV inset (top-right corner) ─────────────────────────────────────
-        inset = make_bev_inset(bev, cands, scores, best_k, size=200, heatmap=heatmap)
+        # ── BEV inset (top-right corner, larger, with rollouts) ──────────────
+        inset = make_bev_inset(bev, cands, scores_norm, best_k,
+                               size=BEV_PANEL, heatmap=heatmap, max_draw=300)
         ih, iw = inset.shape[:2]
-        img[12:12+ih, IMG_W-iw-12:IMG_W-12] = inset
+        x0 = IMG_W - iw - BEV_MARGIN
+        y0 = BEV_MARGIN
+        img[y0:y0+ih, x0:x0+iw] = inset
 
-        # ── HUD — dark pill background for readability ────────────────────────
+        # BEV panel label strip (matches "/navigation/bev_costmap_rollouts" style)
+        lbl_h = 24
+        lbl_overlay = img.copy()
+        cv2.rectangle(lbl_overlay, (x0, y0-lbl_h), (x0+iw, y0), (20, 20, 20), -1)
+        cv2.addWeighted(lbl_overlay, 0.85, img, 0.15, 0, img)
+        cv2.rectangle(img, (x0, y0-lbl_h), (x0+iw, y0), (90, 90, 90), 1)
+        cv2.putText(img, '/bev/traversability_rollouts',
+                    (x0+10, y0-7), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (200, 200, 200), 1, cv2.LINE_AA)
+
+        # ── Top-left HUD pill ────────────────────────────────────────────────
         hud_overlay = img.copy()
-        cv2.rectangle(hud_overlay, (8, 6), (500, 102), (0, 0, 0), -1)
-        cv2.addWeighted(hud_overlay, 0.45, img, 0.55, 0, img)
+        cv2.rectangle(hud_overlay, (8, 6), (520, 116), (0, 0, 0), -1)
+        cv2.addWeighted(hud_overlay, 0.55, img, 0.45, 0, img)
+        cv2.rectangle(img, (8, 6), (520, 116), (90, 90, 90), 1)
 
         cv2.putText(img, 'CREStE-Nano  |  mapless navigation',
-                    (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+                    (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # "Autonomy Enabled" badge (orange pill, CREStE-style)
+        badge_x, badge_y, badge_w, badge_h = 16, 44, 168, 22
+        cv2.rectangle(img, (badge_x, badge_y), (badge_x+badge_w, badge_y+badge_h),
+                      (40, 110, 245), -1)
+        cv2.rectangle(img, (badge_x, badge_y), (badge_x+badge_w, badge_y+badge_h),
+                      (10, 60, 180), 1)
+        cv2.putText(img, 'AUTONOMY ENABLED',
+                    (badge_x+10, badge_y+16), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+
         # Steering bar
-        bar_x, bar_y, bar_w, bar_h = 16, 42, 220, 14
-        cv2.rectangle(img, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), (60,60,60), -1)
+        bar_x, bar_y, bar_w, bar_h = 16, 76, 240, 12
+        cv2.rectangle(img, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), (60, 60, 60), -1)
         centre = bar_x + bar_w // 2
         fill_x = centre + int(steer * (bar_w // 2))
         fill_x = max(bar_x, min(bar_x + bar_w, fill_x))
         col = (40, 220, 80) if abs(steer) < 0.3 else (40, 160, 255) if abs(steer) < 0.6 else (40, 80, 255)
-        cv2.rectangle(img, (min(centre, fill_x), bar_y+2), (max(centre, fill_x), bar_y+bar_h-2), col, -1)
-        cv2.rectangle(img, (centre-1, bar_y), (centre+1, bar_y+bar_h), (200,200,200), -1)
+        cv2.rectangle(img, (min(centre, fill_x), bar_y+2),
+                      (max(centre, fill_x), bar_y+bar_h-2), col, -1)
+        cv2.rectangle(img, (centre-1, bar_y), (centre+1, bar_y+bar_h), (200, 200, 200), -1)
         cv2.putText(img, f'steer {steer:+.2f}',
-                    (bar_x + bar_w + 10, bar_y + 11), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200,255,200), 1, cv2.LINE_AA)
+                    (bar_x + bar_w + 10, bar_y + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 255, 200), 1, cv2.LINE_AA)
+
         cv2.putText(img, f'frame {i+1}/{n}',
-                    (16, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (160,160,160), 1, cv2.LINE_AA)
+                    (16, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (160, 160, 160), 1, cv2.LINE_AA)
 
         # Rolling correlation
         if len(steer_h) > 10:
             h_a, p_a = np.array(steer_h), np.array(planner_h)
             mask = np.abs(h_a) > 0.02
             if mask.sum() > 5:
-                corr = np.corrcoef(h_a[mask], p_a[mask])[0,1]
-                corr_col = (80,255,80) if corr > 0.7 else (80,200,255) if corr > 0.4 else (80,80,255)
+                corr = np.corrcoef(h_a[mask], p_a[mask])[0, 1]
+                corr_col = (80, 255, 80) if corr > 0.7 else (80, 200, 255) if corr > 0.4 else (80, 80, 255)
                 cv2.putText(img, f'human corr  {corr:+.2f}',
-                            (16, 97), cv2.FONT_HERSHEY_SIMPLEX, 0.48, corr_col, 1, cv2.LINE_AA)
+                            (200, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                            corr_col, 1, cv2.LINE_AA)
+
+        # ── Bottom-right: score colour legend ────────────────────────────────
+        leg_w, leg_h = 240, 14
+        leg_x = IMG_W - leg_w - BEV_MARGIN
+        leg_y = IMG_H - 36
+        # Gradient bar
+        for px in range(leg_w):
+            s = px / (leg_w - 1)
+            cv2.line(img, (leg_x + px, leg_y), (leg_x + px, leg_y + leg_h),
+                     score_to_bgr(s), 1)
+        cv2.rectangle(img, (leg_x, leg_y), (leg_x + leg_w, leg_y + leg_h),
+                      (200, 200, 200), 1)
+        cv2.putText(img, 'low  reward  high',
+                    (leg_x, leg_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                    (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(img, 'CHOSEN', (leg_x + leg_w - 60, leg_y + leg_h + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 80), 1, cv2.LINE_AA)
 
         writer.write(img)
 
-        if (i+1) % 200 == 0:
+        if (i + 1) % 200 == 0:
             print(f'  {i+1}/{n}', flush=True)
 
     writer.release()
