@@ -199,6 +199,45 @@ def build_frame_list(data_dir):
                 })
     return entries
 
+# ── Greedy argmax path through the UNet traversability heatmap ───────────────
+def unet_greedy_path_bev(heatmap, T=24, step_size=4.5, window=10, bev_size=128):
+    """Find the column-wise argmax through the UNet heatmap going forward from
+    the car, with a local search window so the path stays continuous.
+
+    This is what a greedy planner would output if it trusted the reward model
+    perfectly — it visibly tracks the most-traversable corridor each frame,
+    independent of MPPI's stochastic sampling.
+    Returns an (T, 2) array of (row, col) BEV coordinates."""
+    H, W = heatmap.shape
+    # Re-scale BEV step into heatmap row space
+    row_step = step_size * (H / bev_size)
+    car_row = H - 1
+    car_col = W // 2
+
+    path = []
+    prev_col = float(car_col)
+    for t in range(T):
+        r = int(round(car_row - (t + 1) * row_step))
+        r = max(0, min(H - 1, r))
+        lo = max(0, int(prev_col - window))
+        hi = min(W, int(prev_col + window + 1))
+        local = heatmap[r, lo:hi]
+        # Quadratic interpolation around the argmax for sub-pixel smoothness
+        amax = int(np.argmax(local))
+        col = lo + amax
+        if 1 <= amax < local.size - 1:
+            l, m, rgt = local[amax-1], local[amax], local[amax+1]
+            denom = (l - 2*m + rgt)
+            if abs(denom) > 1e-6:
+                col = lo + amax + 0.5 * (l - rgt) / denom
+        # Soft continuity toward previous column so the path doesn't snap
+        prev_col = 0.5 * prev_col + 0.5 * col
+        # Re-scale heatmap (row, col) back to BEV (row, col) coords
+        bev_row = r * (bev_size / H)
+        bev_col = prev_col * (bev_size / W)
+        path.append((bev_row, bev_col))
+    return np.array(path, dtype=np.float32)
+
 # ── Path smoothing (chosen path comes out of MPPI noisy) ──────────────────────
 def _smooth_path_bev(path_bev):
     """Fit a smooth quadratic curve x = f(y) through the BEV path so the
@@ -234,6 +273,38 @@ def draw_path_on_image(img, path_bev, color, thickness=3, alpha=0.85, smooth=Tru
         cv2.polylines(overlay, [arr], False, color, thickness, cv2.LINE_AA)
     cv2.addWeighted(overlay, alpha, img, 1-alpha, 0, img)
     return pts
+
+def draw_dashed_path_on_image(img, path_bev, color, dot_radius=4, gap=6,
+                              alpha=0.95, smooth=True):
+    """Render a path as a series of dots (dashed line look) on the camera image."""
+    if smooth:
+        path_bev = _smooth_path_bev(path_bev)
+    pts = _project_path(path_bev)
+    if len(pts) < 2:
+        return
+    overlay = img.copy()
+    # Walk along the polyline at fixed pixel intervals so dots are evenly spaced
+    arr = np.array(pts, dtype=np.float32)
+    segs = np.linalg.norm(np.diff(arr, axis=0), axis=1)
+    total = segs.sum()
+    if total < 1:
+        return
+    step = dot_radius * 2 + gap
+    n_dots = int(total / step) + 1
+    cum = np.concatenate([[0.0], np.cumsum(segs)])
+    for k in range(n_dots):
+        target = k * step
+        if target > total:
+            break
+        # Find segment containing target distance
+        i = int(np.searchsorted(cum, target) - 1)
+        i = max(0, min(i, len(segs) - 1))
+        f = (target - cum[i]) / max(segs[i], 1e-6)
+        x = int(arr[i, 0] + f * (arr[i+1, 0] - arr[i, 0]))
+        y = int(arr[i, 1] + f * (arr[i+1, 1] - arr[i, 1]))
+        cv2.circle(overlay, (x, y), dot_radius, color, -1, cv2.LINE_AA)
+        cv2.circle(overlay, (x, y), dot_radius + 1, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 def draw_filled_path(img, path_bev, color, alpha=0.32, smooth=True):
     """Draw a filled translucent corridor along the (smoothed) best path."""
@@ -365,7 +436,7 @@ def _viridis(arr_u8):
 
 # ── BEV inset (CREStE dotted-endpoint style) ──────────────────────────────────
 def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
-                   n_rollouts=60, committed_path=None):
+                   n_rollouts=60, committed_path=None, greedy_path=None):
     """CREStE-style BEV panel:
        • viridis (or muted dark) background showing the traversability heatmap
        • each rollout drawn as a series of small dots along the trajectory
@@ -429,12 +500,23 @@ def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
     for j in range(len(bpts) - 1):
         cv2.line(halo, bpts[j], bpts[j+1], (255, 255, 255), 7, cv2.LINE_AA)
     cv2.addWeighted(halo, 0.28, inset, 0.72, 0, inset)
-    # Bright cyan dotted committed path
+    # Bright cyan dotted committed (MPPI) path
     for x, y in bpts[:-1]:
         cv2.circle(inset, (x, y), 3, (255, 240, 90), -1, cv2.LINE_AA)
     ex, ey = bpts[-1]
     cv2.circle(inset, (ex, ey), 8, (255, 240, 90), -1, cv2.LINE_AA)
     cv2.circle(inset, (ex, ey), 8, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # UNet greedy path: small white outlined dots so it reads as the "model's
+    # preferred direction" running alongside MPPI's noisier output.
+    if greedy_path is not None:
+        gp = np.asarray(greedy_path)
+        gpts = [(int(gp[j, 1] * scale), int(gp[j, 0] * scale))
+                for j in range(gp.shape[0])]
+        # Skip dots near MPPI cyan dots to reduce overlap visual noise
+        for j, (x, y) in enumerate(gpts):
+            cv2.circle(inset, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(inset, (x, y), 4, (40, 40, 40), 1, cv2.LINE_AA)
 
     # Car marker (white-ringed red dot)
     cx, cy = size // 2, size - 10
@@ -514,31 +596,44 @@ def run(args):
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Compute the MPPI nominal trajectory (committed plan) ─────────────
-        # This is the weighted average of all 1000 sampled rollouts — what the
-        # planner is actually going to execute — not a single noisy sample.
+        # ── Compute MPPI nominal trajectory + UNet greedy path ───────────────
+        # MPPI: weighted average over K=1000 sampled rollouts (planner output)
         nom_path = planner.nominal_trajectory()
-        # Temporal EMA across frames so the display path is decisive and stable
         if ema_path is None:
             ema_path = nom_path.copy()
         else:
             ema_path = EMA_ALPHA * ema_path + (1.0 - EMA_ALPHA) * nom_path
 
-        # ── Camera overlay: clean Tesla-style corridor + smooth centreline ───
-        # (rollouts live in the BEV panel — keep the main view uncluttered)
-        # Wider soft-cyan corridor for the chosen path
-        draw_filled_path(img, ema_path, (220, 200, 90), alpha=0.32)
-        # Soft halo behind the centreline (white, very faint)
+        # UNet greedy: column-argmax through the trained heatmap, what the
+        # reward model alone would steer toward without MPPI noise.
+        if heatmap is not None:
+            greedy_path = unet_greedy_path_bev(
+                heatmap, T=planner.T,
+                step_size=planner.step_size,
+                window=10, bev_size=128)
+        else:
+            greedy_path = None
+
+        # ── Camera overlay ───────────────────────────────────────────────────
+        # 1) Filled cyan corridor around the MPPI committed path
+        draw_filled_path(img, ema_path, (220, 200, 90), alpha=0.28)
+        # 2) UNet greedy path drawn as a WHITE DASHED line (the trained
+        #    reward model's preferred direction, independent of MPPI)
+        if greedy_path is not None:
+            draw_dashed_path_on_image(
+                img, greedy_path, (255, 255, 255),
+                dot_radius=4, gap=8, alpha=0.92)
+        # 3) MPPI committed path: soft halo + bright cyan solid centreline
         draw_path_on_image(img, ema_path, (255, 255, 255),
-                           thickness=16, alpha=0.18)
-        # Bright cyan centreline on top, smooth and crisp
+                           thickness=14, alpha=0.16)
         draw_path_on_image(img, ema_path, (255, 240, 80),
-                           thickness=5, alpha=0.95)
+                           thickness=4, alpha=0.95)
 
         # ── BEV inset (top-right corner) ─────────────────────────────────────
         inset = make_bev_inset(bev, cands, scores_norm, best_k,
                                size=BEV_PANEL, heatmap=heatmap, n_rollouts=60,
-                               committed_path=ema_path)
+                               committed_path=ema_path,
+                               greedy_path=greedy_path)
         ih, iw = inset.shape[:2]
         x0 = IMG_W - iw - BEV_MARGIN
         y0 = BEV_MARGIN
@@ -596,6 +691,28 @@ def run(args):
         cv2.putText(img, f'frame {i+1}/{n}',
                     (bar_x + bar_w - 110, bar_y + bar_h + 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160, 160, 160), 1, cv2.LINE_AA)
+
+        # ── Bottom-left two-path legend (honest framing) ─────────────────────
+        leg_x, leg_y = BEV_MARGIN, IMG_H - 56
+        leg_overlay = img.copy()
+        cv2.rectangle(leg_overlay, (leg_x - 4, leg_y - 4),
+                      (leg_x + 360, leg_y + 48), (15, 15, 15), -1)
+        cv2.addWeighted(leg_overlay, 0.55, img, 0.45, 0, img)
+        cv2.rectangle(img, (leg_x - 4, leg_y - 4),
+                      (leg_x + 360, leg_y + 48), (80, 80, 80), 1)
+        # Cyan = MPPI
+        cv2.line(img, (leg_x + 4, leg_y + 10), (leg_x + 32, leg_y + 10),
+                 (255, 240, 90), 4, cv2.LINE_AA)
+        cv2.putText(img, 'MPPI committed path (planner output)',
+                    (leg_x + 42, leg_y + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 220, 220), 1, cv2.LINE_AA)
+        # White dashed = UNet greedy
+        for k in range(4):
+            cx = leg_x + 6 + k * 8
+            cv2.circle(img, (cx, leg_y + 36), 3, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.putText(img, 'UNet greedy path (learned reward)',
+                    (leg_x + 42, leg_y + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 220, 220), 1, cv2.LINE_AA)
 
         writer.write(img)
 
