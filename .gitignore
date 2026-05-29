@@ -50,3 +50,47 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Output videos and images (generated artifacts)
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
+*.ply
+*.npy
+*.tar.gz
+*.dtbo
+*.dts
+
+# Home-dir dotfiles accidentally in repo root
+.bash_history
+.bash_logout
+.bashrc
+.profile
+.viminfo
+.wget-hsts
+.sudo_as_admin_successful
+.xsessionrc
+.claude.json
+.claude/
+.config/
+.local/
+.npm/
+.ros/
+.ssh/
+Desktop/
+
+# Misc test/scratch files
+camera_depth_test.py
+camera_test.jpg
+depth_comparison.jpg
+depth_map.jpg
+pointcloud.ply
+pointcloud_now.jpg
+ref_frame_*.jpg
+sample_frame.jpg
+snapshot.jpg
+test_cam.jpg
+train_log.txt
+train_traversability_log.txt

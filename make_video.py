@@ -182,7 +182,10 @@ def make_bev_inset(bev, cands, scores, best_k, size=240, heatmap=None):
     else:
         bev_vis = np.linalg.norm(bev, axis=2)
         bev_vis = (bev_vis - bev_vis.min()) / (bev_vis.max() - bev_vis.min() + 1e-8)
-    inset = cv2.applyColorMap((bev_vis*255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    # Depth-map style colormap (blue → cyan → green → yellow → red)
+    inset = cv2.applyColorMap((bev_vis*255).astype(np.uint8), cv2.COLORMAP_TURBO)
+    # Mild Gaussian smoothing so it looks continuous, not pixelated
+    inset = cv2.GaussianBlur(inset, (3, 3), 0)
     inset = cv2.resize(inset, (size, size))
     scale = size / 128.0
     # Just the best path — keep the inset readable
