@@ -558,7 +558,10 @@ def run(args):
     n = min(len(bev_files), len(frames), args.frames)
     print(f'Rendering {n} frames → {args.out}')
 
-    planner = MPPIPlanner(T=24, step_size=4.5, lateral_scale=3.5)
+    # Lower momentum so the planner actually reacts to the reward landscape
+    # each frame instead of carrying 80% of the previous plan forward.
+    planner = MPPIPlanner(T=24, step_size=4.5, lateral_scale=3.5,
+                          momentum=0.40, sigma=0.45)
     fourcc  = cv2.VideoWriter_fourcc(*'mp4v')
     writer  = cv2.VideoWriter(args.out, fourcc, args.fps, (IMG_W, IMG_H))
 
@@ -568,7 +571,7 @@ def run(args):
     # EMA-smoothed display path so the cyan line on the camera reads as a
     # confident, decisive arc rather than a frame-to-frame jitter.
     ema_path = None
-    EMA_ALPHA = 0.35   # cyan MPPI: light smoothing so it actually reacts
+    EMA_ALPHA = 0.0    # no display smoothing — show raw planner output
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
