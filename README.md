@@ -60,11 +60,11 @@ CREStE achieved 2 km mapless navigation on a $10,000 Clearpath Jackal with LiDAR
 
 ## How It Works
 
-```
-Camera ─► DINOv2 ViT-S/14 ─► BEV feature grid ─► TraversabilityUNet ─► MPPI planner ─► ESP8266 ─► car
-              │                    ▲
-              └─► Depth Anything V2 ┘
-```
+<p align="center">
+  <img src="docs/architecture.png" width="780" alt="CREStE-Nano end-to-end architecture"/>
+</p>
+
+The whole pipeline runs as 13 ROS 2 nodes on a single Jetson Orin Nano, top-to-bottom:
 
 1. **Perception** — DINOv2-small extracts a 384-dim semantic feature per 14×14 image patch. Depth Anything V2 estimates a dense depth map from the same single RGB frame.
 
