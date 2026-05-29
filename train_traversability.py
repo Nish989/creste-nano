@@ -1,20 +1,6 @@
 """
 train_traversability.py
-Positive-Unlabeled learning over DINOv2 BEV features.
 
-Theory:
-  Pixels the car actually drove through  → POSITIVE (traversable)
-  Other BEV pixels                       → UNLABELED  (treated as soft negatives)
-
-Trains a tiny MLP on the raw 384-dim DINOv2 feature vector at each pixel,
-producing a scalar traversability score.  At inference time, every BEV pixel
-gets a score, and MPPI paths are ranked by the mean traversability along them.
-
-Because DINOv2 features are universal (pretrained on the internet), the
-classifier generalises: "things that visually look like sidewalk/road in
-DINOv2 space are traversable, anywhere in the world."
-
-No route memorisation. No semantic-seg model. No human steering as label.
 """
 
 import sys, os
