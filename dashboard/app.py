@@ -199,6 +199,12 @@ def stop_current():
         add_log('[DASHBOARD] Stopped current mode')
     state['process'] = None
     state['mode'] = 'idle'
+    # Kill any stray ROS2 nodes left over from previous sessions
+    subprocess.run(
+        ['pkill', '-f', 'mapless_nav/(camera|gps|teleop|pwm|safety|data_recorder|waypoint|perception|bev|reward|planner|speed|intervention)'],
+        capture_output=True
+    )
+    time.sleep(1)
 
 def add_log(line):
     state['log_lines'].append(line)
@@ -363,7 +369,7 @@ async def handle_ws_message(ws, data):
             shell=True
         )
         await broadcast({'type': 'mode', 'mode': 'idle'})
-        await broadcast({'type': 'log', 'line': '[DASHBOARD] ⚠️ E-STOP TRIGGERED'})
+        await broadcast({'type': 'log', 'line': '[DASHBOARD] E-STOP TRIGGERED'})
 
     elif action == 'add_waypoint':
         wp = {'lat': data['lat'], 'lon': data['lon']}
@@ -637,7 +643,7 @@ HTML = """<!DOCTYPE html>
 <body>
 
 <div class="header">
-  <h1>CREStE<span>-Nano</span> 🤖</h1>
+  <h1>CREStE<span>-Nano</span></h1>
   <div style="display:flex;align-items:center;gap:10px">
     <span><span class="conn-dot" id="connDot"></span><span id="connText" style="font-size:11px;color:#555">WS</span></span>
     <span><span class="conn-dot" id="ros2Dot"></span><span id="ros2Text" style="font-size:11px;color:#555">ROS2</span></span>
@@ -649,27 +655,27 @@ HTML = """<!DOCTYPE html>
 
   <!-- Control -->
   <div class="card">
-    <h2>🎮 Control</h2>
+    <h2>Control</h2>
     <div class="btn-grid">
       <button class="btn btn-teleop" onclick="startMode('teleop')">
-        <span class="icon">🕹️</span>Teleop
+        Teleop
       </button>
       <button class="btn btn-data" onclick="startMode('data_collection')">
-        <span class="icon">⏺️</span>Record
+        Record
       </button>
       <button class="btn btn-auto" onclick="startMode('autonomous')">
-        <span class="icon">🤖</span>Autonomous
+        Autonomous
       </button>
       <button class="btn btn-stop" onclick="stopMode()">
-        <span class="icon">⏹️</span>Stop
+        Stop
       </button>
-      <button class="btn-estop" onclick="estop()">⚠️ EMERGENCY STOP</button>
+      <button class="btn-estop" onclick="estop()">EMERGENCY STOP</button>
     </div>
   </div>
 
   <!-- Metrics -->
   <div class="card">
-    <h2>📊 Live Metrics</h2>
+    <h2>Live Metrics</h2>
     <div class="metrics-grid">
       <div class="metric" id="m-nir">
         <div class="value" id="val-nir">—</div>
@@ -700,14 +706,14 @@ HTML = """<!DOCTYPE html>
 
   <!-- Map -->
   <div class="card span2">
-    <h2>📍 GPS Route Planner — tap map to add waypoints</h2>
+    <h2>GPS Route Planner — tap map to add waypoints</h2>
     <div id="map"></div>
     <div id="gpsCoords" style="padding:10px;text-align:center;font-size:14px;color:#76c7ff;display:none">
       <span id="gpsText">Waiting for GPS fix...</span>
     </div>
     <div class="map-controls">
-      <button class="map-btn" onclick="clearWaypoints()">🗑️ Clear Waypoints</button>
-      <button class="map-btn" onclick="centerOnCar()">🎯 Center on Car</button>
+      <button class="map-btn" onclick="clearWaypoints()">Clear Waypoints</button>
+      <button class="map-btn" onclick="centerOnCar()">Center on Car</button>
       <span style="flex:2;padding:8px;font-size:11px;color:#555;text-align:right" id="wpCount">0 waypoints</span>
     </div>
     <div class="waypoint-list" id="wpList"></div>
@@ -715,11 +721,10 @@ HTML = """<!DOCTYPE html>
 
   <!-- Camera -->
   <div class="card">
-    <h2>📷 Camera Feed</h2>
+    <h2>Camera Feed</h2>
     <div class="camera-feed">
       <img id="cameraImg" src="" style="display:none"/>
       <div id="camOffline" style="display:none;flex-direction:column;align-items:center;gap:8px;color:#333">
-        <span style="font-size:32px">📷</span>
         <span>Camera offline</span>
         <span style="font-size:10px">Start a mode to activate</span>
       </div>
@@ -728,7 +733,7 @@ HTML = """<!DOCTYPE html>
 
   <!-- Terminal -->
   <div class="card">
-    <h2>🖥️ ROS2 Log</h2>
+    <h2>ROS2 Log</h2>
     <div class="terminal" id="terminal"></div>
   </div>
 
@@ -852,7 +857,7 @@ function updateMetrics(m) {
       var el = document.getElementById('gpsCoords');
       el.style.display = 'block';
       document.getElementById('gpsText').textContent =
-        '📍 ' + m.gps_lat.toFixed(6) + ', ' + m.gps_lon.toFixed(6) +
+        m.gps_lat.toFixed(6) + ', ' + m.gps_lon.toFixed(6) +
         '  |  🧭 ' + Math.round(m.heading || 0) + '°' +
         '  |  🏎️ ' + (m.speed || 0).toFixed(1) + ' m/s';
     }
@@ -893,7 +898,7 @@ function initMap() {
     document.getElementById("map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:13px">Map unavailable — Leaflet failed to load</div>';
     return;
   }
-  map = L.map("map").setView([30.5389, -97.7095], 17);
+  map = L.map("map").setView([30.5209, -97.7154], 17);
   // Use local cached tiles (works offline), fall back to OSM on WiFi
   var tileUrl = (location.hostname === '10.42.0.1')
     ? '/tiles/{z}/{x}/{y}'
@@ -904,7 +909,7 @@ function initMap() {
     errorTileUrl: '',
   }).addTo(map);
   carIcon = L.divIcon({
-    html: '<div style="font-size:24px;transform:translate(-50%,-50%)">🚗</div>',
+    html: '<div style="width:12px;height:12px;background:#76c7ff;border:2px solid #fff;border-radius:50%;transform:translate(-50%,-50%)"></div>',
     iconSize: [0,0],
     className: '',
   });
@@ -1038,9 +1043,7 @@ async def main():
     print(f'  Open on your phone: http://192.168.1.125:{PORT}')
     print(f'')
 
-    # Auto-launch data_collection mode so GPS + camera + teleop are live immediately
-    threading.Thread(target=start_mode, args=('data_collection',), daemon=True).start()
-    print('  Auto-starting data_collection mode...')
+    # No auto-launch — press Record/Teleop/Autonomous on the dashboard to start nodes
 
     await asyncio.Event().wait()
 

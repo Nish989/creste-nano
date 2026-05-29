@@ -31,8 +31,13 @@ class CameraNode(Node):
         self._set_exposure(device, exposure_time)
 
         # Try GStreamer with hardware JPEG decoder first.
+        # Use manual exposure in GStreamer so auto_exposure doesn't fight us outdoors
+        # Always use manual exposure — auto_exposure blows out outdoors.
+        # exposure_time param overrides default of 30 (×100µs = 1/333s shutter).
+        _exp = exposure_time if exposure_time > 0 else 40
+        _gst_exp = f"auto_exposure=1,exposure_time_absolute={_exp}"
         gst_pipeline = (
-            f"v4l2src device={device} extra-controls=\"c,auto_exposure=3\" ! "
+            f"v4l2src device={device} extra-controls=\"c,{_gst_exp}\" ! "
             f"image/jpeg,width={width},height={height},framerate=30/1 ! "
             f"nvjpegdec ! nvvidconv ! "
             f"video/x-raw,format=BGRx ! videoconvert ! "
@@ -73,16 +78,7 @@ class CameraNode(Node):
 
     def _set_exposure(self, device, exposure_time):
         if exposure_time <= 0:
-            # Auto exposure — try multiple control names (varies by camera)
-            for ctrl in ['auto_exposure=3', 'exposure_auto=3',
-                         'auto_exposure=0', 'white_balance_automatic=1',
-                         'white_balance_temperature_auto=1',
-                         'backlight_compensation=1']:
-                subprocess.run(
-                    ['v4l2-ctl', f'--device={device}', '-c', ctrl],
-                    capture_output=True)
-            self.get_logger().info('Exposure: auto (all auto controls enabled)')
-            return
+            exposure_time = 40  # default manual shutter for outdoors
         # Manual exposure: disable auto, then set absolute shutter speed
         r1 = subprocess.run(
             ['v4l2-ctl', f'--device={device}', '-c', 'auto_exposure=1'],
@@ -97,20 +93,36 @@ class CameraNode(Node):
             self.get_logger().warn(
                 f'Failed to set manual exposure — check v4l2-ctl. Staying on auto.')
 
+    @staticmethod
+    def _build_gamma_lut(gamma: float):
+        """Build a lookup table for gamma correction (gamma>1 darkens highlights)."""
+        import numpy as np
+        table = (np.arange(256, dtype=np.float32) / 255.0) ** gamma
+        return (table * 255).astype('uint8')
+
+    # Pre-build LUTs for speed
+    _LUT_DARK  = None  # applied when overexposed
+    _LUT_BRIGHT = None  # applied when underexposed
+
     def capture(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
             return
 
-        # Software auto-exposure: fix blown-out frames
+        # Build LUTs once
+        if CameraNode._LUT_DARK is None:
+            import numpy as np
+            CameraNode._LUT_DARK   = self._build_gamma_lut(4.5)   # strong darkening
+            CameraNode._LUT_BRIGHT = self._build_gamma_lut(0.55)  # brightening
+
+        # Tone-map using gamma LUT — works even on partially saturated pixels
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         brightness = gray.mean()
-        if brightness > 170:  # overexposed
-            scale = 130.0 / brightness
-            frame = cv2.convertScaleAbs(frame, alpha=scale, beta=0)
-        elif brightness < 50:  # underexposed
-            scale = 100.0 / max(brightness, 1)
-            frame = cv2.convertScaleAbs(frame, alpha=min(scale, 3.0), beta=20)
+        if brightness > 80:
+            # Gamma>1 compresses highlights non-linearly — much better than linear scale
+            frame = cv2.LUT(frame, CameraNode._LUT_DARK)
+        elif brightness < 40:
+            frame = cv2.LUT(frame, CameraNode._LUT_BRIGHT)
 
         ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
         if not ok:
