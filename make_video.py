@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── Traversability MLP (matches train_traversability.py) ─────────────────────
+# ── Traversability MLP (fallback) ────────────────────────────────────────────
 class TraversabilityMLP(nn.Module):
     def __init__(self, feat_dim=384, hidden=256):
         super().__init__()
@@ -32,6 +32,30 @@ class TraversabilityMLP(nn.Module):
             nn.Linear(hidden, 1),
         )
     def forward(self, x): return self.net(x).squeeze(-1)
+
+# ── Traversability UNet (primary — matches train_traversability_cnn.py) ───────
+class TraversabilityUNet(nn.Module):
+    def __init__(self, in_ch=384, base=64):
+        super().__init__()
+        self.enc1 = self._block(in_ch, base)
+        self.pool1 = nn.MaxPool2d(2)
+        self.enc2 = self._block(base, base*2)
+        self.pool2 = nn.MaxPool2d(2)
+        self.bot  = self._block(base*2, base*4)
+        self.up2  = nn.ConvTranspose2d(base*4, base*2, 2, stride=2)
+        self.dec2 = self._block(base*4, base*2)
+        self.up1  = nn.ConvTranspose2d(base*2, base, 2, stride=2)
+        self.dec1 = self._block(base*2, base)
+        self.out  = nn.Conv2d(base, 1, 1)
+    def _block(self, i, o):
+        return nn.Sequential(
+            nn.Conv2d(i, o, 3, padding=1), nn.BatchNorm2d(o), nn.ReLU(inplace=True),
+            nn.Conv2d(o, o, 3, padding=1), nn.BatchNorm2d(o), nn.ReLU(inplace=True))
+    def forward(self, x):
+        e1 = self.enc1(x); e2 = self.enc2(self.pool1(e1)); b = self.bot(self.pool2(e2))
+        d2 = self.dec2(torch.cat([self.up2(b), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+        return self.out(d1)
 
 # ── MPPI Planner ──────────────────────────────────────────────────────────────
 class MPPIPlanner:
@@ -82,7 +106,7 @@ def score_candidates(bev, candidates):
 
 
 def score_candidates_pu(trav_model, bev, candidates, device):
-    """Per-pixel PU traversability scoring.  Returns (path_scores, pixel_heatmap)."""
+    """MLP per-pixel traversability scoring.  Returns (path_scores, pixel_heatmap)."""
     bev_max = bev.shape[0] - 1
     H, W, D = bev.shape
     with torch.no_grad():
@@ -92,6 +116,20 @@ def score_candidates_pu(trav_model, bev, candidates, device):
     bx = np.clip(candidates[:, :, 1].astype(int), 0, bev_max)
     path_scores = score_pix[by, bx].mean(axis=1)
     return path_scores, score_pix
+
+def score_candidates_unet(trav_model, bev_raw, candidates, device):
+    """UNet spatial traversability scoring.  bev_raw is 64×64×384."""
+    bev64 = bev_raw.transpose(2, 0, 1)   # (384,64,64)
+    with torch.no_grad():
+        t = torch.from_numpy(bev64).unsqueeze(0).to(device)
+        pix64 = torch.sigmoid(trav_model(t)).squeeze().cpu().numpy()   # (64,64)
+    # Upsample to 128×128 to match candidate coordinates
+    pix = np.kron(pix64, np.ones((2, 2)))
+    bev_max = pix.shape[0] - 1
+    by = np.clip(candidates[:, :, 0].astype(int), 0, bev_max)
+    bx = np.clip(candidates[:, :, 1].astype(int), 0, bev_max)
+    path_scores = pix[by, bx].mean(axis=1)
+    return path_scores, pix
 
 # ── Perspective projection: BEV pixel → camera image pixel ───────────────────
 # BEV is 128×128. Car at (row=127, col=64).
@@ -175,46 +213,96 @@ def draw_filled_path(img, path_bev, color):
     cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
 
 # ── BEV inset ─────────────────────────────────────────────────────────────────
-def make_bev_inset(bev, cands, scores, best_k, size=240, heatmap=None):
-    """If heatmap is provided (per-pixel traversability), use it; else fallback to feature norm."""
+def make_bev_inset(bev, cands, scores, best_k, size=256, heatmap=None):
+    """Rich traversability heatmap with MPPI rollouts and glowing best path."""
+
+    # ── 1. Build heatmap ──────────────────────────────────────────────────────
     if heatmap is not None:
-        bev_vis = heatmap
+        raw = heatmap.astype(np.float32)
     else:
-        bev_vis = np.linalg.norm(bev, axis=2)
-        bev_vis = (bev_vis - bev_vis.min()) / (bev_vis.max() - bev_vis.min() + 1e-8)
-    # Depth-map style colormap (blue → cyan → green → yellow → red)
-    inset = cv2.applyColorMap((bev_vis*255).astype(np.uint8), cv2.COLORMAP_TURBO)
-    # Mild Gaussian smoothing so it looks continuous, not pixelated
-    inset = cv2.GaussianBlur(inset, (3, 3), 0)
-    inset = cv2.resize(inset, (size, size))
-    scale = size / 128.0
-    # Just the best path — keep the inset readable
-    pass
-    # Best path
-    bpts = [(int(cands[best_k,j,1]*scale), int(cands[best_k,j,0]*scale))
+        raw = np.linalg.norm(bev, axis=2).astype(np.float32)
+
+    # Normalise to [0,1] with contrast stretch
+    lo, hi = np.percentile(raw, 2), np.percentile(raw, 98)
+    raw = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)
+
+    # Bicubic upsample → smooth, not blocky
+    raw_up = cv2.resize(raw, (size, size), interpolation=cv2.INTER_CUBIC)
+    raw_up = np.clip(raw_up, 0, 1)
+
+    # Light bilateral filter to smooth noise while keeping road edges sharp
+    raw_u8 = (raw_up * 255).astype(np.uint8)
+    raw_u8 = cv2.bilateralFilter(raw_u8, d=7, sigmaColor=40, sigmaSpace=40)
+
+    # INFERNO colormap: black → purple → orange → white-yellow (classic heatmap)
+    heatimg = cv2.applyColorMap(raw_u8, cv2.COLORMAP_INFERNO)
+
+    # ── 2. Dark panel background with slight transparency ─────────────────────
+    panel = np.zeros((size + 28, size + 0, 3), dtype=np.uint8)  # extra header strip
+    panel[28:, :] = heatimg
+
+    # Header bar (dark slate)
+    panel[:28, :] = (30, 30, 30)
+    cv2.putText(panel, 'TRAVERSABILITY  BEV',
+                (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1, cv2.LINE_AA)
+
+    # ── 3. MPPI candidate rollouts (top-20 by score, faint coloured lines) ────
+    scale     = size / 128.0
+    n_show    = 30
+    order     = np.argsort(scores)[::-1][:n_show]
+    s_min, s_max = scores[order[-1]], scores[order[0]]
+
+    for ki in order[::-1]:   # draw worst first so best is on top
+        t = (scores[ki] - s_min) / (s_max - s_min + 1e-8)
+        # colour: bad=dark red, good=bright cyan
+        r = int(80  + (1 - t) * 120)
+        g = int(t * 200)
+        b = int(t * 220)
+        pts = [(int(cands[ki, j, 1] * scale), int(cands[ki, j, 0] * scale + 28))
+               for j in range(cands.shape[1])]
+        for j in range(len(pts) - 1):
+            cv2.line(panel, pts[j], pts[j+1], (b, g, r), 1, cv2.LINE_AA)
+
+    # ── 4. Best path — glow effect (thick dark outline + bright centre) ───────
+    bpts = [(int(cands[best_k, j, 1] * scale), int(cands[best_k, j, 0] * scale + 28))
             for j in range(cands.shape[1])]
-    for j in range(len(bpts)-1):
-        cv2.line(inset, bpts[j], bpts[j+1], (255,255,255), 2, cv2.LINE_AA)
-    # Car marker
-    cv2.drawMarker(inset, (size//2, size-4), (100,200,255),
-                   cv2.MARKER_TRIANGLE_UP, 10, 2)
-    # Border
-    cv2.rectangle(inset, (0,0), (size-1,size-1), (80,80,80), 1)
-    return inset
+    for j in range(len(bpts) - 1):
+        cv2.line(panel, bpts[j], bpts[j+1], (20, 180, 60),  5, cv2.LINE_AA)   # dark glow
+        cv2.line(panel, bpts[j], bpts[j+1], (80, 255, 160), 2, cv2.LINE_AA)   # bright core
+
+    # ── 5. Car marker — solid white chevron ───────────────────────────────────
+    cx, cy = size // 2, size + 28 - 5
+    tri = np.array([[cx, cy - 10], [cx - 7, cy + 2], [cx + 7, cy + 2]], np.int32)
+    cv2.fillPoly(panel, [tri], (255, 255, 255))
+    cv2.polylines(panel, [tri], True, (40, 40, 40), 1, cv2.LINE_AA)
+
+    # ── 6. Thin border ────────────────────────────────────────────────────────
+    h, w = panel.shape[:2]
+    cv2.rectangle(panel, (0, 0), (w - 1, h - 1), (70, 70, 70), 1)
+
+    return panel
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run(args):
     device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
     print(f'Device: {device}')
 
-    # Load traversability MLP
-    trav_path = os.path.expanduser('~/Desktop/JOYDEEP/models/reward_model/traversability_mlp.pth')
+    # Load traversability model — prefer UNet (corr_turns=0.914), fall back to MLP
+    unet_path = os.path.expanduser('~/Desktop/JOYDEEP/models/reward_model/traversability_unet.pth')
+    mlp_path  = os.path.expanduser('~/Desktop/JOYDEEP/models/reward_model/traversability_mlp.pth')
     trav_model = None
-    if os.path.exists(trav_path):
-        trav_model = TraversabilityMLP().to(device)
-        trav_model.load_state_dict(torch.load(trav_path, map_location=device, weights_only=True))
+    use_unet   = False
+    if os.path.exists(unet_path):
+        trav_model = TraversabilityUNet().to(device)
+        trav_model.load_state_dict(torch.load(unet_path, map_location=device, weights_only=True))
         trav_model.eval()
-        print(f'Loaded TraversabilityMLP — PU mapless scoring active')
+        use_unet = True
+        print(f'Loaded TraversabilityUNet — spatial BEV scoring active')
+    elif os.path.exists(mlp_path):
+        trav_model = TraversabilityMLP().to(device)
+        trav_model.load_state_dict(torch.load(mlp_path, map_location=device, weights_only=True))
+        trav_model.eval()
+        print(f'Loaded TraversabilityMLP fallback')
     else:
         print(f'No trav model found, using DINOv2 magnitude fallback')
 
@@ -240,7 +328,9 @@ def run(args):
         human   = frames[i]['steering']
 
         U, eps, cands = planner.sample()
-        if trav_model is not None:
+        if trav_model is not None and use_unet:
+            scores, heatmap = score_candidates_unet(trav_model, bev_raw, cands, device)
+        elif trav_model is not None:
             scores, heatmap = score_candidates_pu(trav_model, bev, cands, device)
         else:
             scores, heatmap = score_candidates(bev, cands)
@@ -250,31 +340,49 @@ def run(args):
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Clean overlay: just the best path as a bright glowing line ────
-        # Filled green corridor (subtle background)
+        # ── Camera overlay: filled corridor + glowing centreline ─────────────
         draw_filled_path(img, cands[best_k], (0, 180, 80))
-        # Crisp bright green centerline on top
         draw_path_on_image(img, cands[best_k], (40, 255, 130), thickness=5, alpha=0.95)
 
-        # ── BEV inset (top-right corner) ───────────────────────────────────
-        inset = make_bev_inset(bev, cands, scores, best_k, size=220, heatmap=heatmap)
+        # ── BEV inset (top-right corner) ─────────────────────────────────────
+        inset = make_bev_inset(bev, cands, scores, best_k, size=256, heatmap=heatmap)
         ih, iw = inset.shape[:2]
-        img[12:12+ih, IMG_W-iw-12:IMG_W-12] = inset
+        # Semi-transparent blend so it sits cleanly over the camera image
+        roi = img[12:12+ih, IMG_W-iw-12:IMG_W-12]
+        if roi.shape == inset.shape:
+            cv2.addWeighted(inset, 0.92, roi, 0.08, 0, roi)
+            img[12:12+ih, IMG_W-iw-12:IMG_W-12] = roi
 
-        # ── HUD text ───────────────────────────────────────────────────────
+        # ── HUD — dark pill background for readability ────────────────────────
+        hud_overlay = img.copy()
+        cv2.rectangle(hud_overlay, (8, 6), (500, 102), (0, 0, 0), -1)
+        cv2.addWeighted(hud_overlay, 0.45, img, 0.55, 0, img)
+
         cv2.putText(img, 'CREStE-Nano  |  mapless navigation',
-                    (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,255,255), 2, cv2.LINE_AA)
-        cv2.putText(img, f'steer: {steer:+.2f}   frame: {i+1}/{n}',
-                    (14, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,255,200), 1, cv2.LINE_AA)
+                    (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+        # Steering bar
+        bar_x, bar_y, bar_w, bar_h = 16, 42, 220, 14
+        cv2.rectangle(img, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), (60,60,60), -1)
+        centre = bar_x + bar_w // 2
+        fill_x = centre + int(steer * (bar_w // 2))
+        fill_x = max(bar_x, min(bar_x + bar_w, fill_x))
+        col = (40, 220, 80) if abs(steer) < 0.3 else (40, 160, 255) if abs(steer) < 0.6 else (40, 80, 255)
+        cv2.rectangle(img, (min(centre, fill_x), bar_y+2), (max(centre, fill_x), bar_y+bar_h-2), col, -1)
+        cv2.rectangle(img, (centre-1, bar_y), (centre+1, bar_y+bar_h), (200,200,200), -1)
+        cv2.putText(img, f'steer {steer:+.2f}',
+                    (bar_x + bar_w + 10, bar_y + 11), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200,255,200), 1, cv2.LINE_AA)
+        cv2.putText(img, f'frame {i+1}/{n}',
+                    (16, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (160,160,160), 1, cv2.LINE_AA)
 
-        # Correlation
+        # Rolling correlation
         if len(steer_h) > 10:
             h_a, p_a = np.array(steer_h), np.array(planner_h)
             mask = np.abs(h_a) > 0.02
             if mask.sum() > 5:
                 corr = np.corrcoef(h_a[mask], p_a[mask])[0,1]
-                cv2.putText(img, f'corr (turns): {corr:.2f}',
-                            (14, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150,220,255), 1, cv2.LINE_AA)
+                corr_col = (80,255,80) if corr > 0.7 else (80,200,255) if corr > 0.4 else (80,80,255)
+                cv2.putText(img, f'human corr  {corr:+.2f}',
+                            (16, 97), cv2.FONT_HERSHEY_SIMPLEX, 0.48, corr_col, 1, cv2.LINE_AA)
 
         writer.write(img)
 
