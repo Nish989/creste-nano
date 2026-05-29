@@ -91,10 +91,27 @@ class MPPIPlanner:
         self.nominal_U = np.clip(
             self.momentum * self.nominal_U + np.einsum('k,kt->t', w, epsilons),
             -self.max_steer, self.max_steer)
+        # Stash the *committed* sequence (pre-roll) so the visualizer can show
+        # the actual MPPI output trajectory, not a single noisy sample.
+        self.committed_U = self.nominal_U.copy()
         action = float(self.nominal_U[0])
         self.nominal_U = np.roll(self.nominal_U, -1)
         self.nominal_U[-1] = 0.0
         return action
+
+    def nominal_trajectory(self):
+        """Roll out committed_U from the car position to get the smooth MPPI
+        output trajectory in BEV space (rows = forward, cols = lateral)."""
+        U = self.committed_U if hasattr(self, 'committed_U') else self.nominal_U
+        traj = np.zeros((self.T, 2))
+        x = self.bev_w / 2.0
+        y = self.bev_h - 1.0
+        for t in range(self.T):
+            y -= self.step_size
+            x += U[t] * self.lateral_scale
+            traj[t, 0] = y
+            traj[t, 1] = x
+        return traj
 
 def score_candidates(bev, candidates):
     bev_max = bev.shape[0] - 1
@@ -348,7 +365,7 @@ def _viridis(arr_u8):
 
 # ── BEV inset (CREStE dotted-endpoint style) ──────────────────────────────────
 def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
-                   n_rollouts=60):
+                   n_rollouts=60, committed_path=None):
     """CREStE-style BEV panel:
        • viridis (or muted dark) background showing the traversability heatmap
        • each rollout drawn as a series of small dots along the trajectory
@@ -397,15 +414,27 @@ def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
             continue
         _draw_rollout(inset, k, base_radius=2, endpoint_radius=4)
 
-    # Chosen rollout on top with a halo
+    # Chosen path on top with a halo. Prefer the committed (EMA-smoothed)
+    # MPPI nominal trajectory if available so it matches the camera overlay.
+    if committed_path is not None:
+        cp = np.asarray(committed_path)
+        bpts = [(int(cp[j, 1] * scale), int(cp[j, 0] * scale))
+                for j in range(cp.shape[0])]
+    else:
+        bpts = [(int(cands[best_k, j, 1] * scale), int(cands[best_k, j, 0] * scale))
+                for j in range(T)]
+
+    # White halo behind the chosen path for glow
     halo = inset.copy()
-    bpts = [(int(cands[best_k, j, 1] * scale), int(cands[best_k, j, 0] * scale))
-            for j in range(T)]
-    # White halo line for glow
     for j in range(len(bpts) - 1):
-        cv2.line(halo, bpts[j], bpts[j+1], (255, 255, 255), 6, cv2.LINE_AA)
-    cv2.addWeighted(halo, 0.25, inset, 0.75, 0, inset)
-    _draw_rollout(inset, best_k, base_radius=2, endpoint_radius=6, chosen=True)
+        cv2.line(halo, bpts[j], bpts[j+1], (255, 255, 255), 7, cv2.LINE_AA)
+    cv2.addWeighted(halo, 0.28, inset, 0.72, 0, inset)
+    # Bright cyan dotted committed path
+    for x, y in bpts[:-1]:
+        cv2.circle(inset, (x, y), 3, (255, 240, 90), -1, cv2.LINE_AA)
+    ex, ey = bpts[-1]
+    cv2.circle(inset, (ex, ey), 8, (255, 240, 90), -1, cv2.LINE_AA)
+    cv2.circle(inset, (ex, ey), 8, (255, 255, 255), 1, cv2.LINE_AA)
 
     # Car marker (white-ringed red dot)
     cx, cy = size // 2, size - 10
@@ -453,6 +482,10 @@ def run(args):
     steer_h, planner_h = [], []
     BEV_PANEL = 340   # BEV inset edge length
     BEV_MARGIN = 18
+    # EMA-smoothed display path so the cyan line on the camera reads as a
+    # confident, decisive arc rather than a frame-to-frame jitter.
+    ema_path = None
+    EMA_ALPHA = 0.78   # higher = more smoothing
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
@@ -481,20 +514,31 @@ def run(args):
         steer_h.append(human)
         planner_h.append(steer)
 
+        # ── Compute the MPPI nominal trajectory (committed plan) ─────────────
+        # This is the weighted average of all 1000 sampled rollouts — what the
+        # planner is actually going to execute — not a single noisy sample.
+        nom_path = planner.nominal_trajectory()
+        # Temporal EMA across frames so the display path is decisive and stable
+        if ema_path is None:
+            ema_path = nom_path.copy()
+        else:
+            ema_path = EMA_ALPHA * ema_path + (1.0 - EMA_ALPHA) * nom_path
+
         # ── Camera overlay: clean Tesla-style corridor + smooth centreline ───
         # (rollouts live in the BEV panel — keep the main view uncluttered)
         # Wider soft-cyan corridor for the chosen path
-        draw_filled_path(img, cands[best_k], (220, 200, 90), alpha=0.28)
+        draw_filled_path(img, ema_path, (220, 200, 90), alpha=0.32)
         # Soft halo behind the centreline (white, very faint)
-        draw_path_on_image(img, cands[best_k], (255, 255, 255),
-                           thickness=14, alpha=0.18)
+        draw_path_on_image(img, ema_path, (255, 255, 255),
+                           thickness=16, alpha=0.18)
         # Bright cyan centreline on top, smooth and crisp
-        draw_path_on_image(img, cands[best_k], (255, 240, 80),
-                           thickness=4, alpha=0.95)
+        draw_path_on_image(img, ema_path, (255, 240, 80),
+                           thickness=5, alpha=0.95)
 
         # ── BEV inset (top-right corner) ─────────────────────────────────────
         inset = make_bev_inset(bev, cands, scores_norm, best_k,
-                               size=BEV_PANEL, heatmap=heatmap, n_rollouts=60)
+                               size=BEV_PANEL, heatmap=heatmap, n_rollouts=60,
+                               committed_path=ema_path)
         ih, iw = inset.shape[:2]
         x0 = IMG_W - iw - BEV_MARGIN
         y0 = BEV_MARGIN
