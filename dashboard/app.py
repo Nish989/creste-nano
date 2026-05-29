@@ -341,20 +341,32 @@ async def handle_ws_message(ws, data):
         mode = data.get('mode')
         threading.Thread(target=start_mode, args=(mode,), daemon=True).start()
         await broadcast({'type': 'mode', 'mode': mode})
-        # Tell teleop_node to enter autonomous mode (no PS5 needed)
+        # Signal autonomous mode — publish to BOTH /autonomous_mode (planner direct)
+        # AND /set_autonomous (teleop, for joystick override awareness).
+        # Retry every 2s for 30s so nodes that start late still get the signal.
         if mode == 'autonomous':
-            # Delay so teleop_node has time to start and subscribe
             subprocess.Popen(
-                f'bash -c "sleep 8 && source {WS_DIR}/install/setup.bash && '
-                f'ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool data:\\ true"',
+                f'bash -c "'
+                f'source {WS_DIR}/install/setup.bash; '
+                f'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do '
+                f'  ros2 topic pub -1 /autonomous_mode std_msgs/msg/Bool \\'
+                f'    \'{{\\\"data\\\": true}}\' 2>/dev/null; '
+                f'  ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool \\'
+                f'    \'{{\\\"data\\\": true}}\' 2>/dev/null; '
+                f'  sleep 2; '
+                f'done"',
                 shell=True
             )
 
     elif action == 'stop':
-        # Tell teleop_node to exit autonomous mode
+        # Cancel autonomous mode on both channels
         subprocess.Popen(
-            f'bash -c "source {WS_DIR}/install/setup.bash && '
-            f'ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool data:\\ false"',
+            f'bash -c "'
+            f'source {WS_DIR}/install/setup.bash; '
+            f'ros2 topic pub -1 /autonomous_mode std_msgs/msg/Bool \\'
+            f'  \'{{\\\"data\\\": false}}\' 2>/dev/null; '
+            f'ros2 topic pub -1 /set_autonomous std_msgs/msg/Bool \\'
+            f'  \'{{\\\"data\\\": false}}\' 2>/dev/null"',
             shell=True
         )
         threading.Thread(target=stop_current, daemon=True).start()

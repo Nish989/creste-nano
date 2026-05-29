@@ -38,6 +38,7 @@ class MPPIPlannerNode(Node):
         self.autonomous = False
         self.nominal_U = np.zeros(self.T)
         self.current_epsilons = None
+        self._scores_warmup_ticks = 0   # count ticks waiting for first scores
 
         self.create_subscription(Float32MultiArray, '/reward/scores', self.scores_cb, 5)
         self.create_subscription(Float64, '/waypoint/bearing', self.bearing_cb, 10)
@@ -120,9 +121,19 @@ class MPPIPlannerNode(Node):
 
         if not self.autonomous:
             return
+
         if self.latest_scores is None or len(self.latest_scores) != self.K:
+            # BEV pipeline still warming up — drive straight at half throttle so
+            # safety_node watchdog doesn't time out and cut power
+            self._scores_warmup_ticks += 1
+            if self._scores_warmup_ticks % 20 == 1:   # log every 2s
+                self.get_logger().warn(
+                    f'Waiting for reward scores ({self._scores_warmup_ticks} ticks)...')
+            self.steer_pub.publish(Float64(data=0.0))
+            self.thr_pub.publish(Float64(data=self.auto_throttle * 0.5))
             return
 
+        self._scores_warmup_ticks = 0
         steer = self._update(self.latest_scores.copy(), self.current_epsilons)
         throttle = self.auto_throttle * max(0.5, 1.0 - abs(steer) * 0.5)
 

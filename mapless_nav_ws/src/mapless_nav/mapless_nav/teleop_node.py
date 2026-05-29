@@ -152,6 +152,13 @@ class TeleopNode(Node):
         self._drain_events()
 
         if self.device is None:
+            # No PS5 controller — autonomous mode still works via /set_autonomous subscription.
+            # In estop, actively broadcast zero so safety_node doesn't latch old values.
+            if self.estop_active:
+                self.steer_pub.publish(Float64(data=0.0))
+                self.thr_pub.publish(Float64(data=0.0))
+            # In autonomous mode the planner publishes /cmd_steering + /cmd_throttle directly.
+            # In idle/manual we simply do nothing (safety watchdog will hold zero).
             return
 
         if self._options_held_since is not None:
