@@ -182,35 +182,60 @@ def build_frame_list(data_dir):
                 })
     return entries
 
-# ── Draw path on image ────────────────────────────────────────────────────────
-def draw_path_on_image(img, path_bev, color, thickness=3, alpha=0.85):
-    overlay = img.copy()
+# ── Path smoothing (chosen path comes out of MPPI noisy) ──────────────────────
+def _smooth_path_bev(path_bev):
+    """Fit a smooth quadratic curve x = f(y) through the BEV path so the
+    rendered overlay is a clean arc rather than a jittery polyline."""
+    p = np.asarray(path_bev, dtype=np.float32)
+    if p.shape[0] < 4:
+        return p
+    y = p[:, 0]  # row (forward axis), decreases as we go forward
+    x = p[:, 1]  # col (lateral)
+    # Fit x as a smooth function of y (forward distance)
+    coeffs = np.polyfit(y, x, 2)
+    # Resample to twice as many points for a smoother polyline
+    y_fine = np.linspace(y.min(), y.max(), p.shape[0] * 3)
+    x_fine = np.polyval(coeffs, y_fine)
+    return np.stack([y_fine, x_fine], axis=1)
+
+def _project_path(path_bev):
     pts = []
     for pt in path_bev:
         uv = bev_to_img(pt[0], pt[1])
         if uv and 0 <= uv[0] < IMG_W and 0 <= uv[1] < IMG_H:
             pts.append(uv)
-    for j in range(1, len(pts)):
-        cv2.line(overlay, pts[j-1], pts[j], color, thickness, cv2.LINE_AA)
+    return pts
+
+# ── Draw path on image ────────────────────────────────────────────────────────
+def draw_path_on_image(img, path_bev, color, thickness=3, alpha=0.85, smooth=True):
+    if smooth:
+        path_bev = _smooth_path_bev(path_bev)
+    overlay = img.copy()
+    pts = _project_path(path_bev)
+    if len(pts) >= 2:
+        arr = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(overlay, [arr], False, color, thickness, cv2.LINE_AA)
     cv2.addWeighted(overlay, alpha, img, 1-alpha, 0, img)
     return pts
 
-def draw_filled_path(img, path_bev, color):
-    """Draw a filled translucent corridor along the best path."""
+def draw_filled_path(img, path_bev, color, alpha=0.32, smooth=True):
+    """Draw a filled translucent corridor along the (smoothed) best path."""
+    if smooth:
+        path_bev = _smooth_path_bev(path_bev)
     pts_l, pts_r = [], []
     for pt in path_bev:
         uv = bev_to_img(pt[0], pt[1])
         if uv and 0 <= uv[0] < IMG_W and 0 <= uv[1] < IMG_H:
-            # Left/right offsets in image space (narrows with distance)
-            offset = max(4, int(30 * (IMG_H - uv[1]) / IMG_H))
-            pts_l.append((uv[0]-offset, uv[1]))
-            pts_r.append((uv[0]+offset, uv[1]))
+            # Wider corridor that tapers cleanly with distance
+            offset = max(6, int(46 * (IMG_H - uv[1]) / IMG_H))
+            pts_l.append((uv[0] - offset, uv[1]))
+            pts_r.append((uv[0] + offset, uv[1]))
     if len(pts_l) < 2:
         return
     pts_all = np.array(pts_l + pts_r[::-1], dtype=np.int32)
     overlay = img.copy()
-    cv2.fillPoly(overlay, [pts_all], color)
-    cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+    cv2.fillPoly(overlay, [pts_all], color, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 # ── Score → colour (red=bad, green=ok, cyan=best) ─────────────────────────────
 def score_to_bgr(s):
@@ -321,60 +346,74 @@ def _viridis(arr_u8):
     return _VIRIDIS_LUT[arr_u8]
 
 
-# ── BEV inset (now larger, with rollouts overlaid on traversability heatmap) ──
+# ── BEV inset (CREStE dotted-endpoint style) ──────────────────────────────────
 def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
-                   max_draw=300):
-    """CREStE-style BEV panel: traversability heatmap background with all rollouts
-    coloured by score, best path in bright cyan. heatmap should be the UNet pixel
-    map (HxW, sigmoid 0..1).  Falls back to DINOv2 feature norm if heatmap is None."""
+                   n_rollouts=60):
+    """CREStE-style BEV panel:
+       • viridis (or muted dark) background showing the traversability heatmap
+       • each rollout drawn as a series of small dots along the trajectory
+       • each rollout terminates in a bigger filled-circle endpoint coloured by score
+       • the chosen path's dots + endpoint glow bright cyan
+       • a clean red car marker at the bottom-centre
+       Looks like a particle-style data viz rather than a tangle of polylines."""
 
-    # Background: use UNet traversability if available, otherwise feature norm
     if heatmap is not None:
         bg = heatmap.astype(np.float32)
     else:
         bg = np.linalg.norm(bev, axis=2).astype(np.float32)
     bg = (bg - bg.min()) / (bg.max() - bg.min() + 1e-8)
-
     bg_up = cv2.resize(bg, (size, size), interpolation=cv2.INTER_CUBIC)
     bg_u8 = (np.clip(bg_up, 0, 1) * 255).astype(np.uint8)
     inset = _viridis(bg_u8)
+    # Mute the background so the dotted rollouts pop
+    inset = (inset.astype(np.float32) * 0.55).clip(0, 255).astype(np.uint8)
 
-    # Darken slightly so coloured rollouts pop
-    inset = (inset.astype(np.float32) * 0.72).clip(0, 255).astype(np.uint8)
-
-    # Draw all rollouts in BEV space, colour-coded by score
     scale = size / 128.0
-    K = cands.shape[0]
-    order = np.argsort(scores_norm)
-    if K > max_draw:
-        idx = order[np.linspace(0, K-1, max_draw).astype(int)]
-    else:
-        idx = order
+    K, T = cands.shape[0], cands.shape[1]
 
-    overlay = inset.copy()
-    for k in idx:
+    # Stratified sample so the visible rollouts span the whole score range
+    order = np.argsort(scores_norm)
+    sample_idx = order[np.linspace(0, K-1, min(n_rollouts, K)).astype(int)]
+
+    def _draw_rollout(target, k, base_radius=2, endpoint_radius=5, chosen=False):
+        pts = [(int(cands[k, j, 1] * scale), int(cands[k, j, 0] * scale))
+               for j in range(T)]
+        col = (255, 240, 90) if chosen else score_to_bgr(scores_norm[k])
+        # Path dots — small, every step
+        for j, (x, y) in enumerate(pts[:-1]):
+            r = base_radius + (1 if chosen else 0)
+            cv2.circle(target, (x, y), r, col, -1, cv2.LINE_AA)
+        # Endpoint — bigger filled circle with thin white ring
+        ex, ey = pts[-1]
+        cv2.circle(target, (ex, ey), endpoint_radius + (2 if chosen else 0),
+                   col, -1, cv2.LINE_AA)
+        cv2.circle(target, (ex, ey), endpoint_radius + (2 if chosen else 0),
+                   (255, 255, 255) if chosen else (230, 230, 230), 1, cv2.LINE_AA)
+        return pts[-1]
+
+    # Draw non-chosen rollouts first
+    for k in sample_idx:
         if k == best_k:
             continue
-        pts = [(int(cands[k, j, 1] * scale), int(cands[k, j, 0] * scale))
-               for j in range(cands.shape[1])]
-        col = score_to_bgr(scores_norm[k])
-        for j in range(len(pts) - 1):
-            cv2.line(overlay, pts[j], pts[j+1], col, 1, cv2.LINE_AA)
-    cv2.addWeighted(overlay, 0.85, inset, 0.15, 0, inset)
+        _draw_rollout(inset, k, base_radius=2, endpoint_radius=4)
 
-    # Best path in bright cyan, drawn thick on top
+    # Chosen rollout on top with a halo
+    halo = inset.copy()
     bpts = [(int(cands[best_k, j, 1] * scale), int(cands[best_k, j, 0] * scale))
-            for j in range(cands.shape[1])]
+            for j in range(T)]
+    # White halo line for glow
     for j in range(len(bpts) - 1):
-        cv2.line(inset, bpts[j], bpts[j+1], (255, 255, 80), 3, cv2.LINE_AA)   # bright cyan
-    cv2.line(inset, bpts[0], bpts[0], (255, 255, 255), 5, cv2.LINE_AA)
+        cv2.line(halo, bpts[j], bpts[j+1], (255, 255, 255), 6, cv2.LINE_AA)
+    cv2.addWeighted(halo, 0.25, inset, 0.75, 0, inset)
+    _draw_rollout(inset, best_k, base_radius=2, endpoint_radius=6, chosen=True)
 
-    # Car dot at bottom centre (red, like CREStE)
-    cv2.circle(inset, (size // 2, size - 6), 6, (0, 0, 220), -1)
-    cv2.circle(inset, (size // 2, size - 6), 6, (255, 255, 255), 1)
+    # Car marker (white-ringed red dot)
+    cx, cy = size // 2, size - 10
+    cv2.circle(inset, (cx, cy), 7, (255, 255, 255), -1)
+    cv2.circle(inset, (cx, cy), 5, (60, 60, 220), -1)
 
-    # Subtle dark border
-    cv2.rectangle(inset, (0, 0), (size-1, size-1), (40, 40, 40), 1)
+    # Thin frame
+    cv2.rectangle(inset, (0, 0), (size - 1, size - 1), (90, 90, 90), 1)
 
     return inset
 
@@ -412,8 +451,8 @@ def run(args):
     writer  = cv2.VideoWriter(args.out, fourcc, args.fps, (IMG_W, IMG_H))
 
     steer_h, planner_h = [], []
-    BEV_PANEL = 320   # BEV inset edge length (was 200)
-    BEV_MARGIN = 14
+    BEV_PANEL = 340   # BEV inset edge length
+    BEV_MARGIN = 18
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
@@ -442,94 +481,77 @@ def run(args):
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Camera overlay: all 1000 rollouts coloured by score ──────────────
-        draw_all_rollouts_camera(img, cands, scores_norm, best_k,
-                                 max_draw=300, alpha=0.55)
-        # Filled corridor + bright cyan centreline for chosen path on top
-        draw_filled_path(img, cands[best_k], (255, 200, 60))
-        draw_path_on_image(img, cands[best_k], (255, 255, 80), thickness=5, alpha=0.95)
+        # ── Camera overlay: clean Tesla-style corridor + smooth centreline ───
+        # (rollouts live in the BEV panel — keep the main view uncluttered)
+        # Wider soft-cyan corridor for the chosen path
+        draw_filled_path(img, cands[best_k], (220, 200, 90), alpha=0.28)
+        # Soft halo behind the centreline (white, very faint)
+        draw_path_on_image(img, cands[best_k], (255, 255, 255),
+                           thickness=14, alpha=0.18)
+        # Bright cyan centreline on top, smooth and crisp
+        draw_path_on_image(img, cands[best_k], (255, 240, 80),
+                           thickness=4, alpha=0.95)
 
-        # ── BEV inset (top-right corner, larger, with rollouts) ──────────────
+        # ── BEV inset (top-right corner) ─────────────────────────────────────
         inset = make_bev_inset(bev, cands, scores_norm, best_k,
-                               size=BEV_PANEL, heatmap=heatmap, max_draw=300)
+                               size=BEV_PANEL, heatmap=heatmap, n_rollouts=60)
         ih, iw = inset.shape[:2]
         x0 = IMG_W - iw - BEV_MARGIN
         y0 = BEV_MARGIN
         img[y0:y0+ih, x0:x0+iw] = inset
 
-        # BEV panel label strip (matches "/navigation/bev_costmap_rollouts" style)
-        lbl_h = 24
-        lbl_overlay = img.copy()
-        cv2.rectangle(lbl_overlay, (x0, y0-lbl_h), (x0+iw, y0), (20, 20, 20), -1)
-        cv2.addWeighted(lbl_overlay, 0.85, img, 0.15, 0, img)
-        cv2.rectangle(img, (x0, y0-lbl_h), (x0+iw, y0), (90, 90, 90), 1)
-        cv2.putText(img, '/bev/traversability_rollouts',
-                    (x0+10, y0-7), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (200, 200, 200), 1, cv2.LINE_AA)
+        # Tiny clean caption under the BEV
+        cap_y = y0 + ih + 18
+        cv2.putText(img, 'BEV  •  MPPI rollouts  •  UNet traversability',
+                    (x0 + 2, cap_y), cv2.FONT_HERSHEY_SIMPLEX, 0.44,
+                    (210, 210, 210), 1, cv2.LINE_AA)
 
-        # ── Top-left HUD pill ────────────────────────────────────────────────
-        hud_overlay = img.copy()
-        cv2.rectangle(hud_overlay, (8, 6), (520, 116), (0, 0, 0), -1)
-        cv2.addWeighted(hud_overlay, 0.55, img, 0.45, 0, img)
-        cv2.rectangle(img, (8, 6), (520, 116), (90, 90, 90), 1)
+        # ── Minimal top-left HUD ─────────────────────────────────────────────
+        # Single dark pill, just title + autonomy dot + steering bar.
+        pill_w, pill_h = 360, 76
+        pill = img.copy()
+        cv2.rectangle(pill, (BEV_MARGIN, BEV_MARGIN),
+                      (BEV_MARGIN + pill_w, BEV_MARGIN + pill_h), (15, 15, 15), -1)
+        cv2.addWeighted(pill, 0.6, img, 0.4, 0, img)
+        cv2.rectangle(img, (BEV_MARGIN, BEV_MARGIN),
+                      (BEV_MARGIN + pill_w, BEV_MARGIN + pill_h),
+                      (80, 80, 80), 1)
 
-        cv2.putText(img, 'CREStE-Nano  |  mapless navigation',
-                    (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+        # Title
+        cv2.putText(img, 'CREStE-Nano',
+                    (BEV_MARGIN + 14, BEV_MARGIN + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.78, (240, 240, 240), 2, cv2.LINE_AA)
 
-        # "Autonomy Enabled" badge (orange pill, CREStE-style)
-        badge_x, badge_y, badge_w, badge_h = 16, 44, 168, 22
-        cv2.rectangle(img, (badge_x, badge_y), (badge_x+badge_w, badge_y+badge_h),
-                      (40, 110, 245), -1)
-        cv2.rectangle(img, (badge_x, badge_y), (badge_x+badge_w, badge_y+badge_h),
-                      (10, 60, 180), 1)
-        cv2.putText(img, 'AUTONOMY ENABLED',
-                    (badge_x+10, badge_y+16), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
-                    (255, 255, 255), 1, cv2.LINE_AA)
+        # Green status dot + label (very small, top-right of the pill)
+        dot_x = BEV_MARGIN + pill_w - 130
+        dot_y = BEV_MARGIN + 22
+        cv2.circle(img, (dot_x, dot_y), 6, (90, 230, 110), -1)
+        cv2.circle(img, (dot_x, dot_y), 7, (220, 220, 220), 1)
+        cv2.putText(img, 'AUTONOMOUS',
+                    (dot_x + 12, dot_y + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (220, 240, 220), 1, cv2.LINE_AA)
 
-        # Steering bar
-        bar_x, bar_y, bar_w, bar_h = 16, 76, 240, 12
-        cv2.rectangle(img, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h), (60, 60, 60), -1)
+        # Steering bar (thin, modern)
+        bar_x = BEV_MARGIN + 14
+        bar_y = BEV_MARGIN + 50
+        bar_w = pill_w - 28
+        bar_h = 8
+        cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
+                      (45, 45, 45), -1)
         centre = bar_x + bar_w // 2
         fill_x = centre + int(steer * (bar_w // 2))
         fill_x = max(bar_x, min(bar_x + bar_w, fill_x))
-        col = (40, 220, 80) if abs(steer) < 0.3 else (40, 160, 255) if abs(steer) < 0.6 else (40, 80, 255)
-        cv2.rectangle(img, (min(centre, fill_x), bar_y+2),
-                      (max(centre, fill_x), bar_y+bar_h-2), col, -1)
-        cv2.rectangle(img, (centre-1, bar_y), (centre+1, bar_y+bar_h), (200, 200, 200), -1)
+        cv2.rectangle(img, (min(centre, fill_x), bar_y),
+                      (max(centre, fill_x), bar_y + bar_h),
+                      (255, 240, 90), -1)
+        cv2.line(img, (centre, bar_y - 2), (centre, bar_y + bar_h + 2),
+                 (180, 180, 180), 1)
         cv2.putText(img, f'steer {steer:+.2f}',
-                    (bar_x + bar_w + 10, bar_y + 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 255, 200), 1, cv2.LINE_AA)
-
+                    (bar_x, bar_y + bar_h + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(img, f'frame {i+1}/{n}',
-                    (16, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (160, 160, 160), 1, cv2.LINE_AA)
-
-        # Rolling correlation
-        if len(steer_h) > 10:
-            h_a, p_a = np.array(steer_h), np.array(planner_h)
-            mask = np.abs(h_a) > 0.02
-            if mask.sum() > 5:
-                corr = np.corrcoef(h_a[mask], p_a[mask])[0, 1]
-                corr_col = (80, 255, 80) if corr > 0.7 else (80, 200, 255) if corr > 0.4 else (80, 80, 255)
-                cv2.putText(img, f'human corr  {corr:+.2f}',
-                            (200, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
-                            corr_col, 1, cv2.LINE_AA)
-
-        # ── Bottom-right: score colour legend ────────────────────────────────
-        leg_w, leg_h = 240, 14
-        leg_x = IMG_W - leg_w - BEV_MARGIN
-        leg_y = IMG_H - 36
-        # Gradient bar
-        for px in range(leg_w):
-            s = px / (leg_w - 1)
-            cv2.line(img, (leg_x + px, leg_y), (leg_x + px, leg_y + leg_h),
-                     score_to_bgr(s), 1)
-        cv2.rectangle(img, (leg_x, leg_y), (leg_x + leg_w, leg_y + leg_h),
-                      (200, 200, 200), 1)
-        cv2.putText(img, 'low  reward  high',
-                    (leg_x, leg_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                    (220, 220, 220), 1, cv2.LINE_AA)
-        cv2.putText(img, 'CHOSEN', (leg_x + leg_w - 60, leg_y + leg_h + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 80), 1, cv2.LINE_AA)
+                    (bar_x + bar_w - 110, bar_y + bar_h + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160, 160, 160), 1, cv2.LINE_AA)
 
         writer.write(img)
 
