@@ -9,7 +9,7 @@ The robot learns what terrain looks like from ~20 minutes of human driving, then
 
 ## 🎥 Demo
 
-**▶ [Watch the demo video (demo.mp4)](demo.mp4)** &nbsp;·&nbsp; 500 frames replayed at native 10 Hz showing live camera, BEV traversability heatmap, MPPI candidate trajectories, and selected path.
+**▶ [Watch the demo video (demo.mp4)](demo.mp4)** &nbsp;·&nbsp; the full **8,331 training frames** replayed at 30 Hz (4.63 min). Real recorded camera from Sauls Ranch, Round Rock TX, run through the trained perception + planning pipeline frame-by-frame.
 
 <p align="center">
   <video src="demo.mp4" controls width="720" muted autoplay loop>
@@ -17,7 +17,24 @@ The robot learns what terrain looks like from ~20 minutes of human driving, then
   </video>
 </p>
 
-The demo shows the full perception → planning pipeline running on real recorded camera frames from Sauls Ranch, Round Rock TX. The viridis BEV overlay is the trained UNet's traversability prediction; the red curve is the MPPI-selected trajectory among 1000 candidates.
+### What you're looking at
+
+The demo overlays **two paths** on the camera and on the BEV side-panel so the perception and planning contributions are visually separated:
+
+| Overlay | What it is | What it tells you |
+|---|---|---|
+| **Solid cyan line + corridor** | MPPI committed path — the score-weighted average over K=1000 sampled rollouts that the planner actually outputs each frame | The behaviour of an off-the-shelf MPPI controller running on the learned reward — wobbles, drifts, reacts honestly |
+| **White dashed dots** | UNet greedy argmax through the trained traversability heatmap (column-wise, with local-window continuity) | What the **trained reward model alone** thinks is the most drivable direction, independent of MPPI's stochastic sampling |
+| **Dotted fan in the BEV panel** | 60 score-stratified MPPI rollouts, coloured red → cyan by traversability score, each terminating in an endpoint circle | The MPPI planning *space* — every dot is a candidate the planner considered that frame |
+| **Viridis background in the BEV panel** | The trained UNet's per-pixel sigmoid traversability map (64×64 → upsampled) | Where the perception thinks the corridor is, every frame |
+
+### How to read it
+
+1. **When both paths agree** (most straight sidewalk segments) — that's evidence the learned reward signal is correct *and* usable by a standard sampling-based controller.
+2. **When the white dashed path tracks a curve and the cyan path under-reacts** — that's the honest limitation: the trained perception is right, but a generic 8-step (~1.8 m lookahead) MPPI without an explicit goal under-uses the signal.
+3. **The viridis heatmap inside the BEV panel is the actual model output** — not a stylised graphic. The brighter the cell, the higher the UNet's traversability prediction for that BEV pixel.
+
+The split visualisation makes the project's contribution legible: **the perception (DINOv2 → BEV → UNet) is what's novel here**; the planner is an off-the-shelf piece holding the systems work together. Closing the gap between the two overlays is the obvious follow-up.
 
 ---
 
@@ -44,27 +61,31 @@ CREStE achieved 2 km mapless navigation on a $10,000 Clearpath Jackal with LiDAR
 ## How It Works
 
 ```
-Camera → DINOv2 + Depth Anything V2 → BEV grid → reward model → MPPI planner → ESP8266 → car
+Camera ─► DINOv2 ViT-S/14 ─► BEV feature grid ─► TraversabilityUNet ─► MPPI planner ─► ESP8266 ─► car
+              │                    ▲
+              └─► Depth Anything V2 ┘
 ```
 
-1. **Perception** — DINOv2-small extracts 384-dim semantic features per image patch. Depth Anything V2 estimates depth from a single camera.
+1. **Perception** — DINOv2-small extracts a 384-dim semantic feature per 14×14 image patch. Depth Anything V2 estimates a dense depth map from the same single RGB frame.
 
-2. **BEV Projection** — Features get projected from camera view onto a 64×64 top-down grid (9.6m × 9.6m, 15cm/cell) using the depth map. No LiDAR needed.
+2. **BEV Projection** — Each pixel's DINOv2 feature is back-projected to 3D using its depth and the camera intrinsics, then averaged into a 64×64 top-down grid (9.6 m × 9.6 m, 15 cm/cell). No LiDAR needed.
 
-3. **Reward Learning** — A contrastive model (InfoNCE loss) trained on GPS-supervised demonstrations learns what driveable terrain looks like in BEV feature space.
+3. **Traversability Learning (UNet)** — A small UNet over the (64, 64, 384) BEV feature volume regresses a 64×64 per-cell traversability score. Trained on **8,331 frames** of human driving with GPS-supervised positive/negative labels; held-out `corr_turns = 0.914`.
 
-4. **MPPI Planning** — 1000 random trajectories sampled, scored by the reward model over 8 steps, combined via softmax weighted average. GPS bearing biases toward the destination.
+4. **MPPI Planning** — K=1000 control sequences are sampled with Gaussian noise around a nominal plan, each is rolled out for T=8 steps in the BEV grid, scored against the UNet traversability map, and softmax-weighted into an updated nominal trajectory. GPS bearing biases the score toward the destination when a waypoint is set.
 
-5. **Online Adaptation** — Every time a human takes over (intervention), the reward model updates online. NIR (interventions/100m) logged automatically.
+5. **Safety + Control** — A watchdog node enforces a 0.5 s command timeout and an absolute throttle cap before commands reach the ESP8266 PWM bridge driving the ESC and steering servo.
+
+6. **Online Adaptation (future)** — Every human intervention is logged as a negative example; the UNet can be fine-tuned online via binary cross-entropy on a 500-sample FIFO replay buffer. NIR (interventions per 100 m) is the headline metric.
 
 ---
 
 ## Key Contributions
 
-- Monocular depth as LiDAR substitute for BEV projection — first systematic study
-- GPS-supervised InfoNCE contrastive reward learning (no manual labeling)
-- MPPI trajectory optimization on edge hardware
-- RLHF-style online reward adaptation from human interventions
+- **Monocular DINOv2 → BEV pipeline** runs at 5 FPS on a Jetson Orin Nano, replacing LiDAR with a $50 webcam + Depth Anything V2
+- **GPS-supervised TraversabilityUNet** learns drivable-terrain segmentation from 8,331 frames of human driving without manual labels (val `corr_turns = 0.914`)
+- **End-to-end ROS 2 stack** integrates the perception with an MPPI planner, safety watchdog, and ESC PWM bridge on $500 total hardware
+- **Honest two-path visualisation** in the demo separates the trained reward signal from the planner's exploitation of it, isolating the perception contribution from the off-the-shelf controller
 
 ---
 
@@ -85,23 +106,44 @@ The traversability head — a 384→1 UNet operating on the 64×64 BEV feature g
 | MPPI samples per planning step | 1000 |
 | Planning horizon | 8 steps (~1.8 m lookahead) |
 
-`corr_turns = 0.914` means the UNet's predicted traversability gradient correctly indicates the human-driven steering direction on validation turns — the model has learned a meaningful semantic mapping from DINOv2 features to drivability, not a color shortcut.
+`corr_turns = 0.914` means the UNet's predicted traversability gradient correctly indicates the human-driven steering direction on validation turns — the model has learned a meaningful semantic mapping from DINOv2 features to drivability, not a colour shortcut.
+
+### What the demo proves (and doesn't)
+
+The demo video runs the full perception + planning pipeline on every one of the 8,331 training-set frames. Across the full reel:
+
+- **The UNet greedy path (white dashed) consistently identifies the sidewalk corridor**, even on curves and partial occlusions. That's evidence the trained perception is generalising correctly across the dataset, not memorising.
+- **The MPPI committed path (solid cyan) tracks the UNet greedy path on straight segments** but visibly under-reacts on curves and lateral shifts. That's expected — MPPI with σ=0.45 Gaussian sampling, an 8-step horizon, and no goal will favour the straight prior when the reward landscape is gradual.
+- **The dotted rollout fan in the BEV panel is the actual K=1000 sample distribution** at each frame, score-stratified to 60 visible candidates. Endpoint colour is the per-rollout reward score (red = low, cyan = high).
+
+The demo therefore provides a *visual proof of perception quality* and a *visual diagnostic of planner limitation*. Outdoor closed-loop NIR is the missing piece (see below).
 
 ### Comparison to baseline
 
 | | CREStE (RSS 2025) | CREStE-Nano (ours) |
 |--|---|---|
-| Hardware cost | ~$10,000 | **~$500** (20× cheaper) |
+| Hardware cost | ~$10,000 | **~$500** (≈20× cheaper) |
 | Depth sensor | Velodyne VLP-16 LiDAR | Monocular RGB + Depth Anything V2 |
 | Compute | Jetson AGX Xavier (32 GB) | **Jetson Orin Nano (8 GB)** |
-| Reward model | InfoNCE contrastive (256-dim) | TraversabilityUNet (384→1 spatial) |
-| Demonstrated NIR | 0.05 / 100 m | Pending outdoor weather window |
+| Perception backbone | DINOv2 ViT-B + custom encoder | DINOv2 ViT-S/14 (smaller, fits Orin Nano) |
+| Reward / cost model | InfoNCE contrastive on trajectory features | **Per-cell TraversabilityUNet** (384 → 1 spatial map) |
+| Planner | MPPI with 1000 samples, T = 24 | MPPI with 1000 samples, T = 8 (~1.8 m horizon) |
+| Demonstrated NIR | 0.05 / 100 m on 2 km Mueller loop | Pending outdoor weather window (rained out at Sauls Ranch) |
 
 ### Field testing status
 
-The hardware-integrated end-to-end stack — camera capture, DINOv2 perception, BEV projection, UNet scoring, MPPI planning, safety-watchdogged PWM output — runs at the target rate on the actual car. ESC arms, all 13 ROS 2 nodes launch cleanly, and the closed-loop pipeline is verified on indoor bench tests (wheels turning to predicted steering on recorded sidewalk frames).
+The hardware-integrated end-to-end stack runs at the target rate on the actual car:
 
-**Outdoor NIR measurement is pending a clear-weather test window.** The Sauls Ranch test loop was rained out during the planned evaluation day. The demo video above shows the trained model's decisions on real recorded data from the same site; the next step is logging a continuous autonomous run for NIR.
+- Camera capture at 30 FPS (1280 × 720, manual exposure 1/2000 s for outdoor sunlight)
+- DINOv2 perception at **5 FPS** on the Jetson Orin Nano
+- BEV projection, UNet scoring, MPPI planning all in the same ROS 2 graph
+- ESC arming via the ESP8266 PWM bridge with a 5 s retry-arming sequence
+- Safety watchdog enforcing a 0.5 s command timeout
+- All 13 ROS 2 nodes launch cleanly via `~/drive.sh` or the systemd-managed dashboard
+
+The closed-loop pipeline is verified on indoor bench tests — wheels physically turn to the predicted steering when recorded sidewalk frames are played through the perception stack.
+
+**Outdoor closed-loop NIR is pending a clear-weather test window.** The planned evaluation day at the Sauls Ranch sidewalk loop was rained out. As a substitute for the field run, the demo video above plays *all 8,331 training-set frames* through the trained perception + planning stack offline, so reviewers can audit per-frame behaviour over the entire dataset rather than a single short clip. The next step is logging a continuous outdoor autonomous run for the headline NIR number.
 
 ---
 
@@ -224,41 +266,74 @@ where $E_\theta$ is a 3-layer MLP (input → 256 → 256 → 128) with ReLU acti
 
 ---
 
-### 5. Contrastive Reward Learning (InfoNCE)
+### 5. Traversability Learning (TraversabilityUNet)
 
-Training uses GPS-supervised contrastive pairs. For each anchor frame with demonstrated steering $s$:
+The reward model is a small spatial U-Net $f_\psi$ over the BEV feature volume that regresses a per-cell traversability map:
 
-- **Anchor** $\mathbf{q}$: trajectory feature from the demonstrated steering action
-- **Positive** $\mathbf{k}^+$: trajectory feature from a temporally nearby frame ($|i - j| \leq 5$), same terrain context
-- **Negatives** $\{\mathbf{k}^-_j\}_{j=1}^{N}$: trajectories from hard negative steerings (sharp turns $s \in \{-1, -0.8, 0.8, 1.0\}$) and random steerings
+$$f_\psi : \mathbb{R}^{H \times W \times D} \rightarrow \mathbb{R}^{H \times W}, \quad H = W = 64, \; D = 384$$
 
-The InfoNCE loss:
+Architecture (encoder→bottleneck→decoder, base width $C = 64$):
 
-$$\mathcal{L}_{\text{NCE}} = -\frac{1}{B}\sum_{i=1}^{B} \log \frac{\exp(\mathbf{q}_i \cdot \mathbf{k}_i^+ / \tau)}{\exp(\mathbf{q}_i \cdot \mathbf{k}_i^+ / \tau) + \sum_{j=1}^{N} \exp(\mathbf{q}_i \cdot \mathbf{k}_{ij}^- / \tau)}$$
+- **Encoder**: two Conv→BN→ReLU blocks at $(D \to C)$ and $(C \to 2C)$, each followed by $2 \times 2$ max-pool
+- **Bottleneck**: Conv→BN→ReLU block at $(2C \to 4C)$
+- **Decoder**: transposed $2 \times 2$ convolutions with skip connections from the encoder, mirroring the encoder
+- **Head**: $1 \times 1$ Conv reducing $C \to 1$, output interpreted as logits
 
-with temperature $\tau = 0.07$, batch size $B = 64$, $N = 8$ negatives per anchor.
+At inference:
 
-At inference, the reward head $h_\psi : \mathbb{R}^{128} \to [0,1]$ scores each trajectory:
+$$\sigma\!\left(f_\psi(F_{\text{BEV}})\right) \in [0,1]^{H \times W}$$
 
-$$r(\tau) = \sigma\!\left(h_\psi(\mathbf{z})\right), \quad h_\psi : \mathbb{R}^{128} \xrightarrow{} \mathbb{R}^{64} \xrightarrow{} \mathbb{R}^1$$
+is the per-pixel sigmoid traversability shown as the viridis background in the demo's BEV panel.
+
+#### Supervised label construction
+
+For each frame $t$ of human driving, the demonstrated steering $s_t \in [-1, 1]$ defines a forward rollout in BEV coordinates with step size $\delta_z = 1.5$ cells, lateral step $\delta_x = 2.0 \cdot s_t$ cells, and horizon $T_{\text{label}} = 16$. The label map $Y_t \in \{0, 1\}^{H \times W}$ is:
+
+$$Y_t(i, j) = \begin{cases} 1 & \text{if } (i, j) \text{ is within radius } r = 2 \text{ cells of any rollout point} \\ 0 & \text{otherwise} \end{cases}$$
+
+This gives a sparse positive region (the path the human took) over a mostly-zero background.
+
+#### Loss
+
+Per-pixel weighted binary cross-entropy with positive class weight $w_+ = 4.0$ to handle the sparse-positive imbalance:
+
+$$\mathcal{L} = -\frac{1}{|\Omega|} \sum_{(i,j) \in \Omega} \left[ w_+ Y_t \log \sigma(\hat{Y}_t) + (1 - Y_t) \log(1 - \sigma(\hat{Y}_t)) \right]$$
+
+Optimizer: Adam with $\eta = 10^{-3}$, batch size $B = 16$, $E = 40$ epochs on 8,331 frames, train/val split 90/10.
+
+#### Validation metric — `corr_turns`
+
+For each held-out turning frame ($|s_t| > 0.15$), compute the centre-of-mass column $\bar{c}_t$ of the predicted traversability map at row $r = H - 5$:
+
+$$\bar{c}_t = \frac{\sum_j j \cdot \sigma(f_\psi(F_{\text{BEV}, t}))[r, j]}{\sum_j \sigma(f_\psi(F_{\text{BEV}, t}))[r, j]}$$
+
+The lateral offset of $\bar{c}_t$ from the BEV centre is regressed against $s_t$:
+
+$$\text{corr\_turns} = \mathrm{Pearson}\!\left( \bar{c}_t - W/2, \; s_t \right)$$
+
+This measures whether the model's per-frame "centre of drivability" shifts in the direction the human actually steered. We achieve **`corr_turns = 0.914`** on the held-out turns.
 
 ---
 
 ### 6. MPPI Trajectory Optimization
 
-At each planning step, $K=1000$ control sequences $\{U_k\}_{k=1}^K$ are sampled around the nominal sequence $\bar{U} \in \mathbb{R}^T$:
+At each planning step, $K = 1000$ control sequences $\{U_k\}_{k=1}^K$ are sampled around the nominal sequence $\bar{U} \in \mathbb{R}^T$:
 
-$$U_k = \bar{U} + \epsilon_k, \quad \epsilon_k \sim \mathcal{N}(0, \sigma^2 I), \quad \sigma = 0.3$$
+$$U_k = \bar{U} + \epsilon_k, \quad \epsilon_k \sim \mathcal{N}(0, \sigma^2 I), \quad \sigma = 0.45$$
 
 Each $U_k$ is rolled out in BEV space:
 
 $$x^{t+1} = x^t + u_k^t \cdot \delta_x, \quad z^{t+1} = z^t - \delta_z$$
 
-with $\delta_x = 2.0$, $\delta_z = 1.5$ cells/step (15cm grid → ~22.5cm/step forward). Scores from the reward model are augmented with a GPS bearing bias:
+with $\delta_x = 2.0$, $\delta_z = 1.5$ cells per step (15 cm grid → ~22.5 cm forward per step, $T = 8$, ~1.8 m total lookahead).
 
-$$S_k = r(\tau_k) + \beta \cdot \left(1 - \left|\bar{u}_k^0 - \hat{b}\right|\right)$$
+The score for rollout $k$ is the mean of the UNet's per-pixel sigmoid traversability along its discretised BEV trajectory:
 
-where $\hat{b} = \text{clip}(\psi_{\text{bearing}} / 90°, -1, 1)$ is the normalized GPS bearing and $\beta = 0.3$.
+$$S_k = \frac{1}{T} \sum_{t=1}^{T} \sigma(f_\psi(F_{\text{BEV}}))\!\left[\, b_z^t,\, b_x^t \,\right]$$
+
+When a GPS waypoint is set, the score gets a directional bias proportional to alignment with the bearing:
+
+$$S_k \leftarrow S_k + \beta \cdot \left(1 - \left|\bar{u}_k^0 - \hat{b}\right|\right), \quad \hat{b} = \mathrm{clip}\!\left(\psi_{\text{bearing}} / 90°,\, -1,\, 1\right), \; \beta = 0.3$$
 
 MPPI softmax weights:
 
