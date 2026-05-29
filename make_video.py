@@ -230,8 +230,9 @@ def unet_greedy_path_bev(heatmap, T=24, step_size=4.5, window=10, bev_size=128):
             denom = (l - 2*m + rgt)
             if abs(denom) > 1e-6:
                 col = lo + amax + 0.5 * (l - rgt) / denom
-        # Soft continuity toward previous column so the path doesn't snap
-        prev_col = 0.5 * prev_col + 0.5 * col
+        # Light continuity so the path follows the heatmap aggressively
+        # but doesn't teleport between columns frame-to-frame
+        prev_col = 0.2 * prev_col + 0.8 * col
         # Re-scale heatmap (row, col) back to BEV (row, col) coords
         bev_row = r * (bev_size / H)
         bev_col = prev_col * (bev_size / W)
@@ -567,7 +568,7 @@ def run(args):
     # EMA-smoothed display path so the cyan line on the camera reads as a
     # confident, decisive arc rather than a frame-to-frame jitter.
     ema_path = None
-    EMA_ALPHA = 0.78   # higher = more smoothing
+    EMA_ALPHA = 0.35   # cyan MPPI: light smoothing so it actually reacts
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
