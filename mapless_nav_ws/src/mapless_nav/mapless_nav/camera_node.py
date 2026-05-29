@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 import cv2
+import numpy as np
 
 
 class CameraNode(Node):
@@ -26,9 +27,8 @@ class CameraNode(Node):
         exposure_time = self.get_parameter('exposure_time').value
 
         self.cap = None
-
-        # Set auto-exposure BEFORE opening the pipeline
-        self._set_exposure(device, exposure_time)
+        self._device = device
+        self._exposure_time = exposure_time if exposure_time > 0 else 10
 
         # Try GStreamer with hardware JPEG decoder first.
         # Use manual exposure in GStreamer so auto_exposure doesn't fight us outdoors
@@ -76,6 +76,11 @@ class CameraNode(Node):
         self.pub = self.create_publisher(CompressedImage, '/camera/image_raw/compressed', 10)
         self.create_timer(1.0 / fps, self.capture)
 
+        # Set exposure AFTER pipeline is open — camera resets during GStreamer init
+        self._set_exposure(self._device, self._exposure_time)
+        # Reapply every 5s — some cameras drift back to auto
+        self.create_timer(5.0, lambda: self._set_exposure(self._device, self._exposure_time))
+
     def _set_exposure(self, device, exposure_time):
         if exposure_time <= 0:
             exposure_time = 40  # default manual shutter for outdoors
@@ -100,29 +105,26 @@ class CameraNode(Node):
         table = (np.arange(256, dtype=np.float32) / 255.0) ** gamma
         return (table * 255).astype('uint8')
 
-    # Pre-build LUTs for speed
-    _LUT_DARK  = None  # applied when overexposed
-    _LUT_BRIGHT = None  # applied when underexposed
+    # CLAHE for adaptive local contrast — handles bright outdoor + dark shadow in same frame
+    _clahe = None
 
     def capture(self):
         ret, frame = self.cap.read()
         if not ret or frame is None:
             return
 
-        # Build LUTs once
-        if CameraNode._LUT_DARK is None:
-            import numpy as np
-            CameraNode._LUT_DARK   = self._build_gamma_lut(4.5)   # strong darkening
-            CameraNode._LUT_BRIGHT = self._build_gamma_lut(0.55)  # brightening
+        # Build CLAHE once
+        if CameraNode._clahe is None:
+            # clipLimit=2.5: moderate contrast boost without noise amplification
+            # tileGridSize=(8,8): local 8×8 grid so bright ground + dark trees both normalize
+            CameraNode._clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
 
-        # Tone-map using gamma LUT — works even on partially saturated pixels
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        brightness = gray.mean()
-        if brightness > 80:
-            # Gamma>1 compresses highlights non-linearly — much better than linear scale
-            frame = cv2.LUT(frame, CameraNode._LUT_DARK)
-        elif brightness < 40:
-            frame = cv2.LUT(frame, CameraNode._LUT_BRIGHT)
+        # Apply CLAHE on L channel in LAB space — preserves colours, fixes exposure locally
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l = CameraNode._clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
         ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
         if not ok:

@@ -13,9 +13,11 @@ class PWMControlNode(Node):
         # Parameters
         self.declare_parameter('serial_port', '/dev/ttyUSB0')
         self.declare_parameter('serial_baud', 500000)
+        self.declare_parameter('throttle_limit', 0.30)  # max forward/reverse fraction
 
         port = self.get_parameter('serial_port').value
         baud = self.get_parameter('serial_baud').value
+        self._thr_limit = self.get_parameter('throttle_limit').value
 
         # Track last sent values to avoid flooding serial
         self._last_steer = 1500
@@ -71,7 +73,7 @@ class PWMControlNode(Node):
     def throttle_cb(self, msg):
         if not self.armed:
             return
-        limit = max(-0.12, min(0.12, msg.data))
+        limit = max(-self._thr_limit, min(self._thr_limit, msg.data))
         val = int(1500 + (limit * 500))
         val = max(1000, min(2000, val))
         if abs(val - self._last_thr) >= 8:
