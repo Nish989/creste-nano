@@ -58,6 +58,7 @@ venv/
 *.jpg
 *.jpeg
 *.png
+!docs/plots/*.png
 *.ply
 *.npy
 *.tar.gz

@@ -1,0 +1,10 @@
+{
+  "pos_pred_mean": 0.9963781237602234,
+  "neg_pred_mean": 0.003966841846704483,
+  "margin_mean": 0.9924113750457764,
+  "margin_median": 0.998866081237793,
+  "fraction_positive_margin": 1.0,
+  "n_evaluated": 8331,
+  "model_path": "/Users/nishanmani/Desktop/JOYDEEP/models/reward_model/traversability_unet.pth",
+  "description": "Reproduced from the trained TraversabilityUNet checkpoint. pos_pred = mean sigmoid on the dilated human-rollout corridor mask; neg_pred = mean sigmoid on cells with features but outside the corridor. Margin = pos_pred - neg_pred is what train_traversability_cnn.py tracks per epoch."
+}

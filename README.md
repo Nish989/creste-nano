@@ -70,7 +70,7 @@ Camera ─► DINOv2 ViT-S/14 ─► BEV feature grid ─► TraversabilityUNet 
 
 2. **BEV Projection** — Each pixel's DINOv2 feature is back-projected to 3D using its depth and the camera intrinsics, then averaged into a 64×64 top-down grid (9.6 m × 9.6 m, 15 cm/cell). No LiDAR needed.
 
-3. **Traversability Learning (UNet)** — A small UNet over the (64, 64, 384) BEV feature volume regresses a 64×64 per-cell traversability score. Trained on **8,331 frames** of human driving with GPS-supervised positive/negative labels; held-out `corr_turns = 0.914`.
+3. **Traversability Learning (UNet)** — A small UNet over the (64, 64, 384) BEV feature volume regresses a 64×64 per-cell traversability score. Trained on **8,331 frames** of human driving with weighted BCE against dilated human-rollout corridor masks (positives) vs feature-present background (negatives); reproduced **margin = +0.992** on the training set (mean sigmoid 0.996 on corridor, 0.004 on background).
 
 4. **MPPI Planning** — K=1000 control sequences are sampled with Gaussian noise around a nominal plan, each is rolled out for T=8 steps in the BEV grid, scored against the UNet traversability map, and softmax-weighted into an updated nominal trajectory. GPS bearing biases the score toward the destination when a waypoint is set.
 
@@ -83,7 +83,7 @@ Camera ─► DINOv2 ViT-S/14 ─► BEV feature grid ─► TraversabilityUNet 
 ## Key Contributions
 
 - **Monocular DINOv2 → BEV pipeline** runs at 5 FPS on a Jetson Orin Nano, replacing LiDAR with a $50 webcam + Depth Anything V2
-- **GPS-supervised TraversabilityUNet** learns drivable-terrain segmentation from 8,331 frames of human driving without manual labels (val `corr_turns = 0.914`)
+- **GPS-supervised TraversabilityUNet** learns drivable-terrain segmentation from 8,331 frames of human driving without manual labels (corridor / background margin = +0.992)
 - **End-to-end ROS 2 stack** integrates the perception with an MPPI planner, safety watchdog, and ESC PWM bridge on $500 total hardware
 - **Honest two-path visualisation** in the demo separates the trained reward signal from the planner's exploitation of it, isolating the perception contribution from the off-the-shelf controller
 
@@ -93,12 +93,15 @@ Camera ─► DINOv2 ViT-S/14 ─► BEV feature grid ─► TraversabilityUNet 
 
 ### Trained reward model (TraversabilityUNet)
 
-The traversability head — a 384→1 UNet operating on the 64×64 BEV feature grid — was trained on 8,331 frames of human driving data collected from sidewalks around Sauls Ranch, Round Rock, TX.
+The traversability head — a 384→1 UNet operating on the 64×64 BEV feature grid — was trained on 8,331 frames of human driving data collected from sidewalks around Sauls Ranch, Round Rock, TX, with weighted binary cross-entropy against a dilated corridor mask built from the recorded human steering at each frame.
 
 | Metric | Value |
 |--------|-------|
 | Training frames | **8,331** |
-| Validation correlation on turns (`corr_turns`) | **0.914** |
+| Mean UNet sigmoid on **corridor** cells | **0.996** |
+| Mean UNet sigmoid on **background** cells | **0.004** |
+| **Margin = pos_pred − neg_pred** | **+0.992** |
+| Frames with positive margin | **100.0 %** |
 | BEV grid | 64 × 64 (9.6 m × 9.6 m, 15 cm/cell) |
 | Feature dim per cell | 384 (DINOv2 ViT-S/14) |
 | UNet params | ~8 M |
@@ -106,7 +109,35 @@ The traversability head — a 384→1 UNet operating on the 64×64 BEV feature g
 | MPPI samples per planning step | 1000 |
 | Planning horizon | 8 steps (~1.8 m lookahead) |
 
-`corr_turns = 0.914` means the UNet's predicted traversability gradient correctly indicates the human-driven steering direction on validation turns — the model has learned a meaningful semantic mapping from DINOv2 features to drivability, not a colour shortcut.
+The margin metric is what `train_traversability_cnn.py` tracks every epoch — it measures how cleanly the UNet separates "where the human drove" from "everywhere else with visual signal." All numbers above are **reproduced from the checkpoint** by running `python3 make_plots.py`, which dumps `docs/plots/metrics.json`. The margin is high because the training labels (a dilated 22-step rollout corridor along the recorded steering) are spatially compact and the UNet has enough capacity to fit them well; the *meaningful* question is whether the learned signal generalises in the demo and on outdoor frames, which the visualisations below address.
+
+#### Empirical evaluation plots
+
+All four panels are produced by `make_plots.py` from the trained UNet checkpoint over the full dataset:
+
+<p align="center">
+  <img src="docs/plots/heatmap_examples.png" width="780" alt="UNet predictions on six representative frames"/>
+</p>
+
+*Six frames spanning the full steering range (−1 sharp left → +1 sharp right). Top row is the raw camera frame; bottom row is the UNet's sigmoid traversability map (yellow = high, dark = low) with the predicted centre-of-mass column marked in red and the BEV centreline dotted white.*
+
+<p align="center">
+  <img src="docs/plots/corridor_margin.png" width="780" alt="Per-frame margin distribution across the dataset"/>
+</p>
+
+*Left: the per-frame mean UNet sigmoid on corridor cells (green, mean 0.996) is cleanly separated from the mean on background cells with features (red, mean 0.004). Right: per-frame margin distribution — 100 % of frames have positive margin, mean +0.992, median +0.999.*
+
+<p align="center">
+  <img src="docs/plots/score_distribution.png" width="700" alt="Per-frame mean traversability across the dataset"/>
+</p>
+
+*Per-frame mean UNet sigmoid traversability across all 8,331 frames is unimodal with mean ≈ 0.60. The model is well-calibrated in the bulk: most of the BEV grid is "neither corridor nor background" (empty cells outside the camera FOV), and the mean falls in between the corridor and background bands.*
+
+<p align="center">
+  <img src="docs/plots/mppi_landscape.png" width="900" alt="MPPI score landscape on a sample frame"/>
+</p>
+
+*Left: the UNet heatmap for frame 4000 with K = 1000 MPPI sampled rollouts overlaid (every fifth shown, coloured by score). Right: the histogram of the 1000 per-rollout mean traversability scores. Most rollouts cluster near 1.0 (mean = 0.945, max = 1.000) because they start in a high-traversability region near the car; the tail at lower scores is rollouts that drifted into low-traversability cells.*
 
 ### What the demo proves (and doesn't)
 
@@ -301,17 +332,17 @@ $$\mathcal{L} = -\frac{1}{|\Omega|} \sum_{(i,j) \in \Omega} \left[ w_+ Y_t \log 
 
 Optimizer: Adam with $\eta = 10^{-3}$, batch size $B = 16$, $E = 40$ epochs on 8,331 frames, train/val split 90/10.
 
-#### Validation metric — `corr_turns`
+#### Tracked metric — corridor margin
 
-For each held-out turning frame ($|s_t| > 0.15$), compute the centre-of-mass column $\bar{c}_t$ of the predicted traversability map at row $r = H - 5$:
+`train_traversability_cnn.py` tracks per epoch:
 
-$$\bar{c}_t = \frac{\sum_j j \cdot \sigma(f_\psi(F_{\text{BEV}, t}))[r, j]}{\sum_j \sigma(f_\psi(F_{\text{BEV}, t}))[r, j]}$$
+$$\text{pos\_pred} = \frac{1}{|\Omega_+|} \sum_{(i,j) \in \Omega_+} \sigma(f_\psi(F_{\text{BEV}})_{ij}), \quad \text{neg\_pred} = \frac{1}{|\Omega_-|} \sum_{(i,j) \in \Omega_-} \sigma(f_\psi(F_{\text{BEV}})_{ij})$$
 
-The lateral offset of $\bar{c}_t$ from the BEV centre is regressed against $s_t$:
+$$\text{margin} = \text{pos\_pred} - \text{neg\_pred}$$
 
-$$\text{corr\_turns} = \mathrm{Pearson}\!\left( \bar{c}_t - W/2, \; s_t \right)$$
+where $\Omega_+$ is the dilated 22-step corridor mask and $\Omega_-$ is the set of feature-present cells outside the corridor. On the trained checkpoint, averaged over all 8,331 training-set frames, $\text{pos\_pred} = 0.996$, $\text{neg\_pred} = 0.004$, $\text{margin} = +0.992$.
 
-This measures whether the model's per-frame "centre of drivability" shifts in the direction the human actually steered. We achieve **`corr_turns = 0.914`** on the held-out turns.
+Note that this is a training-set evaluation; the held-out closed-loop NIR is pending the outdoor weather window (see *Field testing status* above).
 
 ---
 
