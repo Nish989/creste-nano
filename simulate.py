@@ -64,6 +64,21 @@ class RewardModel(nn.Module):
     def forward(self, x): return self.head(self.encoder(x))
 
 
+# ── NEW: Per-pixel traversability MLP (PU learning) ──────────────────────────
+class TraversabilityMLP(nn.Module):
+    def __init__(self, feat_dim=384, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, hidden), nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, 1),
+        )
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+
 # ── MPPI Planner (matches planner_node.py) ────────────────────────────────────
 
 class MPPIPlanner:
@@ -111,6 +126,24 @@ class MPPIPlanner:
         self.nominal_U = np.roll(self.nominal_U, -1)
         self.nominal_U[-1] = 0.0
         return action
+
+
+# ── NEW: PU traversability scoring ─────────────────────────────────────────
+def score_candidates_pu(trav_model, bev, candidates, device):
+    """
+    Per-pixel traversability scoring.
+    Runs the MLP on every BEV pixel, then averages scores along each path.
+    """
+    bev_max = bev.shape[0] - 1
+    H, W, D = bev.shape
+    # Score every pixel once per frame
+    with torch.no_grad():
+        flat = torch.from_numpy(bev.reshape(-1, D).astype(np.float32)).to(device)
+        scores_pix = torch.sigmoid(trav_model(flat)).cpu().numpy().reshape(H, W)
+    by = np.clip(candidates[:, :, 0].astype(int), 0, bev_max)
+    bx = np.clip(candidates[:, :, 1].astype(int), 0, bev_max)
+    path_scores = scores_pix[by, bx].mean(axis=1)
+    return path_scores, scores_pix
 
 
 # ── Score candidates using reward model ───────────────────────────────────────
@@ -209,10 +242,21 @@ def run(args):
     prototype = None
     if os.path.exists(proto_path):
         proto_np = np.load(proto_path).astype(np.float32)
-        prototype = torch.from_numpy(proto_np).unsqueeze(0).to(device)  # (1, 128)
-        print(f'Prototype loaded — using cosine-similarity scoring (real-car mode)')
+        prototype = torch.from_numpy(proto_np).unsqueeze(0).to(device)
+        print(f'Prototype loaded')
     else:
-        print(f'No prototype found — will use gt_steer scoring (validation mode)')
+        print(f'No prototype found')
+
+    # NEW: Load per-pixel traversability MLP if available
+    trav_path = os.path.join(os.path.dirname(args.model), 'traversability_mlp.pth')
+    trav_model = None
+    if os.path.exists(trav_path):
+        trav_model = TraversabilityMLP().to(device)
+        trav_model.load_state_dict(torch.load(trav_path, map_location=device, weights_only=True))
+        trav_model.eval()
+        print(f'Traversability MLP loaded from {trav_path} — using PU mapless scoring')
+    else:
+        print(f'No traversability model found — falling back to feature-magnitude scoring')
 
     # Load BEV features
     files = sorted(glob.glob(os.path.join(args.data_dir, '*.npz')))
@@ -296,9 +340,13 @@ def run(args):
 
         # MPPI plan
         U, eps, cands = planner.sample()
-        scores = score_candidates(model, bev, cands, device,
-                                  gt_steer=None if prototype is not None else frame['steering'],
-                                  prototype=prototype)
+        if trav_model is not None:
+            # NEW: PU traversability — preferred mapless scoring
+            scores, _ = score_candidates_pu(trav_model, bev, cands, device)
+        else:
+            scores = score_candidates(model, bev, cands, device,
+                                      gt_steer=None if prototype is not None else frame['steering'],
+                                      prototype=prototype)
         best_k = np.argmax(scores)
         steer = planner.update(scores, eps, wp_bearing)
         throttle = planner.auto_throttle * max(0.5, 1.0 - abs(steer) * 0.5)

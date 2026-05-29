@@ -15,6 +15,23 @@ if _user_sp not in sys.path:
 
 import argparse, glob, json, math
 import cv2, numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ── Traversability MLP (matches train_traversability.py) ─────────────────────
+class TraversabilityMLP(nn.Module):
+    def __init__(self, feat_dim=384, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, hidden), nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, 1),
+        )
+    def forward(self, x): return self.net(x).squeeze(-1)
 
 # ── MPPI Planner ──────────────────────────────────────────────────────────────
 class MPPIPlanner:
@@ -61,7 +78,20 @@ def score_candidates(bev, candidates):
     bx = np.clip(candidates[:, :, 1].astype(int), 0, bev_max)
     feat_norms = np.linalg.norm(bev[by, bx, :], axis=-1)
     raw = feat_norms.mean(axis=1)
-    return raw / (raw.max() + 1e-8)
+    return raw / (raw.max() + 1e-8), None
+
+
+def score_candidates_pu(trav_model, bev, candidates, device):
+    """Per-pixel PU traversability scoring.  Returns (path_scores, pixel_heatmap)."""
+    bev_max = bev.shape[0] - 1
+    H, W, D = bev.shape
+    with torch.no_grad():
+        flat = torch.from_numpy(bev.reshape(-1, D).astype(np.float32)).to(device)
+        score_pix = torch.sigmoid(trav_model(flat)).cpu().numpy().reshape(H, W)
+    by = np.clip(candidates[:, :, 0].astype(int), 0, bev_max)
+    bx = np.clip(candidates[:, :, 1].astype(int), 0, bev_max)
+    path_scores = score_pix[by, bx].mean(axis=1)
+    return path_scores, score_pix
 
 # ── Perspective projection: BEV pixel → camera image pixel ───────────────────
 # BEV is 128×128. Car at (row=127, col=64).
@@ -145,21 +175,18 @@ def draw_filled_path(img, path_bev, color):
     cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
 
 # ── BEV inset ─────────────────────────────────────────────────────────────────
-def make_bev_inset(bev, cands, scores, best_k, size=240):
-    bev_vis = np.linalg.norm(bev, axis=2)
-    bev_vis = (bev_vis - bev_vis.min()) / (bev_vis.max() - bev_vis.min() + 1e-8)
+def make_bev_inset(bev, cands, scores, best_k, size=240, heatmap=None):
+    """If heatmap is provided (per-pixel traversability), use it; else fallback to feature norm."""
+    if heatmap is not None:
+        bev_vis = heatmap
+    else:
+        bev_vis = np.linalg.norm(bev, axis=2)
+        bev_vis = (bev_vis - bev_vis.min()) / (bev_vis.max() - bev_vis.min() + 1e-8)
     inset = cv2.applyColorMap((bev_vis*255).astype(np.uint8), cv2.COLORMAP_INFERNO)
     inset = cv2.resize(inset, (size, size))
     scale = size / 128.0
-    s_min, s_max = scores.min(), scores.max()
-    # Top 80 candidates
-    for k in np.argsort(scores)[-80:]:
-        t = (scores[k]-s_min)/(s_max-s_min+1e-8)
-        c = (0, int(255*t), int(255*(1-t)))
-        pts = [(int(cands[k,j,1]*scale), int(cands[k,j,0]*scale))
-               for j in range(cands.shape[1])]
-        for j in range(len(pts)-1):
-            cv2.line(inset, pts[j], pts[j+1], c, 1, cv2.LINE_AA)
+    # Just the best path — keep the inset readable
+    pass
     # Best path
     bpts = [(int(cands[best_k,j,1]*scale), int(cands[best_k,j,0]*scale))
             for j in range(cands.shape[1])]
@@ -174,6 +201,20 @@ def make_bev_inset(bev, cands, scores, best_k, size=240):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run(args):
+    device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+    print(f'Device: {device}')
+
+    # Load traversability MLP
+    trav_path = os.path.expanduser('~/Desktop/JOYDEEP/models/reward_model/traversability_mlp.pth')
+    trav_model = None
+    if os.path.exists(trav_path):
+        trav_model = TraversabilityMLP().to(device)
+        trav_model.load_state_dict(torch.load(trav_path, map_location=device, weights_only=True))
+        trav_model.eval()
+        print(f'Loaded TraversabilityMLP — PU mapless scoring active')
+    else:
+        print(f'No trav model found, using DINOv2 magnitude fallback')
+
     bev_files = sorted(glob.glob(os.path.join(args.data_dir, 'bev_features', '*.npz')))
     frames    = build_frame_list(args.data_dir)
     n = min(len(bev_files), len(frames), args.frames)
@@ -196,25 +237,24 @@ def run(args):
         human   = frames[i]['steering']
 
         U, eps, cands = planner.sample()
-        scores  = score_candidates(bev, cands)
+        if trav_model is not None:
+            scores, heatmap = score_candidates_pu(trav_model, bev, cands, device)
+        else:
+            scores, heatmap = score_candidates(bev, cands)
         best_k  = np.argmax(scores)
         steer   = planner.update(scores, eps)
 
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Draw top candidates as faint lines on road ─────────────────────
-        for k in np.argsort(scores)[-30:]:
-            t = (scores[k]-scores.min())/(scores.max()-scores.min()+1e-8)
-            color = (0, int(180*t), int(180*(1-t)))
-            draw_path_on_image(img, cands[k], color, thickness=1, alpha=0.5)
-
-        # ── Draw best path as filled corridor + bright line ────────────────
-        draw_filled_path(img, cands[best_k], (0, 200, 100))
-        draw_path_on_image(img, cands[best_k], (0, 255, 120), thickness=3)
+        # ── Clean overlay: just the best path as a bright glowing line ────
+        # Filled green corridor (subtle background)
+        draw_filled_path(img, cands[best_k], (0, 180, 80))
+        # Crisp bright green centerline on top
+        draw_path_on_image(img, cands[best_k], (40, 255, 130), thickness=5, alpha=0.95)
 
         # ── BEV inset (top-right corner) ───────────────────────────────────
-        inset = make_bev_inset(bev, cands, scores, best_k, size=220)
+        inset = make_bev_inset(bev, cands, scores, best_k, size=220, heatmap=heatmap)
         ih, iw = inset.shape[:2]
         img[12:12+ih, IMG_W-iw-12:IMG_W-12] = inset
 
