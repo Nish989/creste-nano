@@ -53,6 +53,7 @@ venv/
 
 # Output videos and images (generated artifacts)
 *.mp4
+!demo.mp4
 *.avi
 *.jpg
 *.jpeg
