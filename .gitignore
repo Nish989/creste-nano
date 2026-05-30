@@ -122,3 +122,14 @@ hid-playstation/Module.symvers
 
 # Workspace local binaries
 mapless_nav_ws/bin/
+
+# LaTeX intermediate build artefacts (compiled PDF is tracked separately)
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.log
+paper/main.out
+paper/main.toc
+paper/main.fls
+paper/main.fdb_latexmk
+paper/main.synctex.gz
