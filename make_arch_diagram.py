@@ -1,7 +1,5 @@
-"""make_arch_diagram.py — clean vertical-flow architecture diagram.
-
-Output: docs/architecture.png  +  docs/architecture.pdf
-"""
+# Build the architecture diagram for the README and paper.
+# Writes docs/architecture.{png,pdf}.
 import os, sys
 _user_sp = os.path.expanduser('~/Library/Python/3.12/lib/python/site-packages')
 if _user_sp not in sys.path:
@@ -69,7 +67,7 @@ def lane(ax, x, y, w, h, label, color, label_x=None):
 
 
 def build_figure():
-    # Tall vertical canvas (extra horizontal room for sidecars)
+    # Canvas with room for sidecar blocks on the left
     fig, ax = plt.subplots(figsize=(13.0, 13.5))
     ax.set_xlim(0, 13); ax.set_ylim(0, 16)
     ax.set_aspect('equal'); ax.axis('off')
@@ -80,8 +78,7 @@ def build_figure():
     BH = 1.05      # block height
     GAP = 0.55     # vertical gap
 
-    # Lane bands (colored zones — purely visual)
-    # We compute y-positions for the blocks first
+    # Lane bands are visual grouping only. Compute block y-positions first.
     blocks = [
         # (kind, title, subtitle)
         ('sensor',     'EMEET 4K Webcam',
@@ -118,7 +115,7 @@ def build_figure():
         ys.append(y_cursor - BH)
         y_cursor -= (BH + GAP)
 
-    # ── Lane bands (group blocks by colour) ──────────────────────────────────
+    # Lane bands (group blocks by colour)
     # Indices into the blocks list:
     lane_specs = [
         (range(0, 3), 'Perception  ·  5 FPS on Jetson Orin Nano',         '#b9d2f7'),
@@ -134,11 +131,11 @@ def build_figure():
         h = y_top - y_bot
         lane(ax, CX - 0.20, y_bot, BW + 0.40, h, label, color)
 
-    # ── Draw blocks ──────────────────────────────────────────────────────────
+    # Draw blocks
     for (kind, title, subtitle), y in zip(blocks, ys):
         block(ax, CX, y, BW, BH, title, subtitle, kind)
 
-    # ── Vertical arrows between consecutive blocks ──────────────────────────
+    # Vertical arrows between consecutive blocks
     DATA_LABELS = {
         (0, 1): None,                     # camera → perception
         (1, 2): None,
@@ -156,7 +153,7 @@ def build_figure():
         arrow(ax, x, y0, x, y1, label=lab, label_dx=0.30, label_dy=0.0,
               label_fontsize=8.4)
 
-    # ── Side inputs (left of the column, with arrows landing cleanly on edge) ──
+    # Sidecar inputs (left of the column)
     GAP_FROM_COL = 0.55   # gap between sidecar block and central column
 
     def side_in(y_center, title, subtitle, label, color='#666', dashed=True):
@@ -179,7 +176,7 @@ def build_figure():
             'phone-friendly UI\nE-stop / waypoints / log', '/autonomous_mode',
             color='#888')
 
-    # Future RLHF (right of MPPI/UNet, dashed, deliberately less prominent)
+    # Future RLHF (right side, dashed)
     fb_w, fb_h = 2.8, BH - 0.32
     fb_x = CX + BW + GAP_FROM_COL
     fb_y = ys[4] + (BH - fb_h) / 2
@@ -192,7 +189,7 @@ def build_figure():
           label='future feedback', label_dx=0.18, label_dy=0.35,
           label_fontsize=7.6, label_color='#777')
 
-    # ── Title ────────────────────────────────────────────────────────────────
+    # Title
     fig.text(0.50, 0.965, 'CREStE-Nano — end-to-end architecture',
              ha='center', fontsize=15, fontweight='bold', color='#222')
     fig.text(0.50, 0.943,

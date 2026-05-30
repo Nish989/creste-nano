@@ -30,10 +30,7 @@ class CameraNode(Node):
         self._device = device
         self._exposure_time = exposure_time if exposure_time > 0 else 10
 
-        # Try GStreamer with hardware JPEG decoder first.
-        # Use manual exposure in GStreamer so auto_exposure doesn't fight us outdoors
-        # Always use manual exposure — auto_exposure blows out outdoors.
-        # exposure_time param overrides default of 30 (×100µs = 1/333s shutter).
+        # GStreamer hw JPEG decode. Manual exposure (auto blows out outdoors).
         _exp = exposure_time if exposure_time > 0 else 40
         _gst_exp = f"auto_exposure=1,exposure_time_absolute={_exp}"
         gst_pipeline = (
@@ -76,9 +73,10 @@ class CameraNode(Node):
         self.pub = self.create_publisher(CompressedImage, '/camera/image_raw/compressed', 10)
         self.create_timer(1.0 / fps, self.capture)
 
-        # Set exposure AFTER pipeline is open — camera resets during GStreamer init
+        # Set exposure after the pipeline opens. The webcam resets during init,
+        # so applying earlier doesn't stick. Reapply periodically in case it
+        # drifts back to auto.
         self._set_exposure(self._device, self._exposure_time)
-        # Reapply every 5s — some cameras drift back to auto
         self.create_timer(5.0, lambda: self._set_exposure(self._device, self._exposure_time))
 
     def _set_exposure(self, device, exposure_time):
@@ -105,7 +103,7 @@ class CameraNode(Node):
         table = (np.arange(256, dtype=np.float32) / 255.0) ** gamma
         return (table * 255).astype('uint8')
 
-    # CLAHE for adaptive local contrast — handles bright outdoor + dark shadow in same frame
+    # CLAHE for local contrast (bright concrete + dark trees in same frame)
     _clahe = None
 
     def capture(self):
@@ -113,13 +111,10 @@ class CameraNode(Node):
         if not ret or frame is None:
             return
 
-        # Build CLAHE once
         if CameraNode._clahe is None:
-            # clipLimit=2.5: moderate contrast boost without noise amplification
-            # tileGridSize=(8,8): local 8×8 grid so bright ground + dark trees both normalize
             CameraNode._clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
 
-        # Apply CLAHE on L channel in LAB space — preserves colours, fixes exposure locally
+        # CLAHE on the L channel in LAB so we don't shift colour
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         l = CameraNode._clahe.apply(l)

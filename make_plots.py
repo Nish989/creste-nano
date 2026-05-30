@@ -1,13 +1,9 @@
-"""make_plots.py — produce evaluation plots from the trained UNet.
-
-All four panels are computed *from the actual checkpoint* on the full 8,331
-training-set frames, not from a stale log.  Output goes to docs/plots/ for
-inclusion in the README and any slide deck.
-
-Usage:
-    python3 make_plots.py
-    python3 make_plots.py --max_frames 2000        # quick run
-"""
+# Reproduce evaluation plots from the trained checkpoint over the dataset.
+# Writes docs/plots/{heatmap_examples, corridor_margin, score_distribution,
+# mppi_landscape}.png and a metrics.json with the headline numbers.
+#
+#   python3 make_plots.py
+#   python3 make_plots.py --max_frames 2000
 
 import argparse, glob, json, os, sys
 _user_sp = os.path.expanduser('~/Library/Python/3.12/lib/python/site-packages')
@@ -28,7 +24,7 @@ OUT_DIR   = os.path.expanduser('~/Desktop/JOYDEEP/docs/plots')
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
-# ── Model (matches train_traversability_cnn.py) ───────────────────────────────
+# Model (matches train_traversability_cnn.py)
 class TraversabilityUNet(nn.Module):
     def __init__(self, in_ch=384, base=64):
         super().__init__()
@@ -57,7 +53,7 @@ class TraversabilityUNet(nn.Module):
         return self.out(d1)
 
 
-# ── Data loading helpers ──────────────────────────────────────────────────────
+# Data loading helpers
 def build_frame_table(data_dir):
     entries = []
     for meta_path in sorted(glob.glob(os.path.join(data_dir, 'session_*/metadata.jsonl'))):
@@ -76,7 +72,7 @@ def load_bev_files(data_dir):
     return sorted(glob.glob(os.path.join(data_dir, 'bev_features', '*.npz')))
 
 
-# ── Forward pass + centre-of-mass extraction ──────────────────────────────────
+# Forward pass + centre-of-mass extraction
 @torch.no_grad()
 def predict_heatmap(model, bev_raw, device):
     """bev_raw is (64, 64, 384) float32 → returns (64, 64) sigmoid heatmap."""
@@ -97,7 +93,7 @@ def heatmap_centre_of_mass(heatmap, row=None):
     return float((cols * weights).sum() / weights.sum())
 
 
-# ── Plotting style ────────────────────────────────────────────────────────────
+# Plotting style
 plt.rcParams.update({
     'font.family': 'sans-serif',
     'font.size': 10,
@@ -109,7 +105,7 @@ plt.rcParams.update({
 })
 
 
-# ── Plot 1: heatmap quality grid ──────────────────────────────────────────────
+# Plot 1: heatmap quality grid
 def plot_heatmap_grid(model, frames, bev_files, device, n_examples=6, out_path=None):
     """Pick frames spanning the steering distribution (sharp left, mild left,
     straight x2, mild right, sharp right) and show camera + heatmap pairs."""
@@ -157,7 +153,7 @@ def plot_heatmap_grid(model, frames, bev_files, device, n_examples=6, out_path=N
     plt.close(fig)
 
 
-# ── Plot 2: corridor margin (the actual training-script metric) ──────────────
+# Plot 2: corridor margin (matches the metric the training script logs)
 def build_corridor_mask(steering, dilate_px=3, n_steps=22):
     """Match train_traversability_cnn.py exactly."""
     mask = np.zeros((64, 64), dtype=np.uint8)
@@ -265,7 +261,7 @@ def plot_corridor_margin(model, frames, bev_files, device,
     }
 
 
-# ── Plot 3: per-frame mean traversability distribution ───────────────────────
+# Plot 3: per-frame mean traversability distribution
 def plot_score_distribution(model, bev_files, device, max_frames=None, out_path=None):
     n = len(bev_files) if max_frames is None else min(max_frames, len(bev_files))
     means = np.zeros(n, dtype=np.float32)
@@ -295,7 +291,7 @@ def plot_score_distribution(model, bev_files, device, max_frames=None, out_path=
     plt.close(fig)
 
 
-# ── Plot 4: MPPI rollout score distribution for a sample frame ───────────────
+# Plot 4: MPPI rollout score distribution for a sample frame
 def plot_mppi_landscape(model, bev_files, device, frame_idx=4000, K=1000, T=8,
                        out_path=None):
     bev_raw = np.load(bev_files[frame_idx])['bev'].astype(np.float32)
@@ -366,7 +362,7 @@ def plot_mppi_landscape(model, bev_files, device, frame_idx=4000, K=1000, T=8,
     plt.close(fig)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 def main(args):
     device = (torch.device('mps') if torch.backends.mps.is_available()
               else torch.device('cpu'))
@@ -412,7 +408,7 @@ def main(args):
                         out_path=os.path.join(OUT_DIR, 'mppi_landscape.png'))
     print('wrote mppi_landscape.png')
 
-    # Persist real numbers so the README can reference them honestly
+    # Dump the numbers so the README can cite them
     with open(os.path.join(OUT_DIR, 'metrics.json'), 'w') as f:
         json.dump({
             **margin_stats,

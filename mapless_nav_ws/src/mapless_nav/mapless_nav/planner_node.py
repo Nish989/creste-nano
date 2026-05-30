@@ -123,10 +123,10 @@ class MPPIPlannerNode(Node):
             return
 
         if self.latest_scores is None or len(self.latest_scores) != self.K:
-            # BEV pipeline still warming up — drive straight at half throttle so
-            # safety_node watchdog doesn't time out and cut power
+            # No scores yet. Drive straight at half throttle to keep the
+            # safety watchdog fed while perception spins up.
             self._scores_warmup_ticks += 1
-            if self._scores_warmup_ticks % 20 == 1:   # log every 2s
+            if self._scores_warmup_ticks % 20 == 1:
                 self.get_logger().warn(
                     f'Waiting for reward scores ({self._scores_warmup_ticks} ticks)...')
             self.steer_pub.publish(Float64(data=0.0))

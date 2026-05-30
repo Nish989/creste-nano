@@ -1,12 +1,9 @@
-"""
-make_video.py  —  CREStE-Nano demo video
-Draws the MPPI planned path directly onto the camera image (like Tesla autopilot)
-plus a small BEV inset in the corner.
-
-Usage:
-  python3 make_video.py --frames 500       # preview
-  python3 make_video.py                    # full 8331 frames
-"""
+# Render the demo video. Replays the dataset through the trained UNet + MPPI
+# and overlays cyan = MPPI committed path, white dashed = UNet greedy argmax.
+# BEV inset shows the rollout fan and the trav heatmap.
+#
+#   python3 make_video.py --frames 500
+#   python3 make_video.py
 
 import sys, os
 _user_sp = os.path.expanduser('~/Library/Python/3.12/lib/python/site-packages')
@@ -20,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── Traversability MLP (fallback) ────────────────────────────────────────────
+# Traversability MLP (fallback)
 class TraversabilityMLP(nn.Module):
     def __init__(self, feat_dim=384, hidden=256):
         super().__init__()
@@ -33,7 +30,7 @@ class TraversabilityMLP(nn.Module):
         )
     def forward(self, x): return self.net(x).squeeze(-1)
 
-# ── Traversability UNet (primary — matches train_traversability_cnn.py) ───────
+# Traversability UNet (primary — matches train_traversability_cnn.py) 
 class TraversabilityUNet(nn.Module):
     def __init__(self, in_ch=384, base=64):
         super().__init__()
@@ -57,7 +54,7 @@ class TraversabilityUNet(nn.Module):
         d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
         return self.out(d1)
 
-# ── MPPI Planner ──────────────────────────────────────────────────────────────
+# MPPI Planner
 class MPPIPlanner:
     def __init__(self, K=1000, T=16, sigma=0.35, lam=0.1,
                  bev_w=128, bev_h=128, step_size=4.0, lateral_scale=4.0,
@@ -91,8 +88,8 @@ class MPPIPlanner:
         self.nominal_U = np.clip(
             self.momentum * self.nominal_U + np.einsum('k,kt->t', w, epsilons),
             -self.max_steer, self.max_steer)
-        # Stash the *committed* sequence (pre-roll) so the visualizer can show
-        # the actual MPPI output trajectory, not a single noisy sample.
+        # Keep a copy before the roll so we can plot the actual MPPI output
+        # instead of one random sample.
         self.committed_U = self.nominal_U.copy()
         action = float(self.nominal_U[0])
         self.nominal_U = np.roll(self.nominal_U, -1)
@@ -148,14 +145,14 @@ def score_candidates_unet(trav_model, bev_raw, candidates, device):
     path_scores = pix[by, bx].mean(axis=1)
     return path_scores, pix
 
-# ── Perspective projection: BEV pixel → camera image pixel ───────────────────
+# Perspective projection: BEV pixel → camera image pixel 
 # BEV is 128×128. Car at (row=127, col=64).
 # Physical scale: ~0.08 m per pixel (so 128px ≈ 10m forward)
 # Camera: 1280×720, ~70° HFOV, mounted ~15cm above ground, ~5° pitch down
 
 IMG_W, IMG_H = 1280, 720
 
-# ── Homography: BEV (col, row) → image (x, y) ────────────────────────────────
+# Homography: BEV (col, row) → image (x, y) 
 # Calibrated from actual camera frames.
 # BEV is 128×128, car at (row=127, col=64).
 # 4 ground-plane correspondences picked from the sidewalk footage:
@@ -185,7 +182,7 @@ def bev_to_img(bev_row, bev_col, bev_h=128, bev_w=128):
         return u, v
     return None
 
-# ── Build ordered frame list ──────────────────────────────────────────────────
+# Build ordered frame list
 def build_frame_list(data_dir):
     entries = []
     for meta_path in sorted(glob.glob(os.path.join(data_dir, 'session_*/metadata.jsonl'))):
@@ -199,7 +196,7 @@ def build_frame_list(data_dir):
                 })
     return entries
 
-# ── Greedy argmax path through the UNet traversability heatmap ───────────────
+# Greedy argmax path through the UNet traversability heatmap
 def unet_greedy_path_bev(heatmap, T=24, step_size=4.5, window=10, bev_size=128):
     """Find the column-wise argmax through the UNet heatmap going forward from
     the car, with a local search window so the path stays continuous.
@@ -239,7 +236,7 @@ def unet_greedy_path_bev(heatmap, T=24, step_size=4.5, window=10, bev_size=128):
         path.append((bev_row, bev_col))
     return np.array(path, dtype=np.float32)
 
-# ── Path smoothing (chosen path comes out of MPPI noisy) ──────────────────────
+# Path smoothing (chosen path comes out of MPPI noisy)
 def _smooth_path_bev(path_bev):
     """Fit a smooth quadratic curve x = f(y) through the BEV path so the
     rendered overlay is a clean arc rather than a jittery polyline."""
@@ -263,7 +260,7 @@ def _project_path(path_bev):
             pts.append(uv)
     return pts
 
-# ── Draw path on image ────────────────────────────────────────────────────────
+# Draw path on image
 def draw_path_on_image(img, path_bev, color, thickness=3, alpha=0.85, smooth=True):
     if smooth:
         path_bev = _smooth_path_bev(path_bev)
@@ -315,7 +312,7 @@ def draw_filled_path(img, path_bev, color, alpha=0.32, smooth=True):
     for pt in path_bev:
         uv = bev_to_img(pt[0], pt[1])
         if uv and 0 <= uv[0] < IMG_W and 0 <= uv[1] < IMG_H:
-            # Wider corridor that tapers cleanly with distance
+            # Corridor narrows with distance
             offset = max(6, int(46 * (IMG_H - uv[1]) / IMG_H))
             pts_l.append((uv[0] - offset, uv[1]))
             pts_r.append((uv[0] + offset, uv[1]))
@@ -326,7 +323,7 @@ def draw_filled_path(img, path_bev, color, alpha=0.32, smooth=True):
     cv2.fillPoly(overlay, [pts_all], color, cv2.LINE_AA)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
-# ── Score → colour (red=bad, green=ok, cyan=best) ─────────────────────────────
+# Score → colour (red=bad, green=ok, cyan=best) 
 def score_to_bgr(s):
     """Map normalized score in [0,1] to BGR (red→orange→yellow→green→cyan)."""
     s = float(np.clip(s, 0.0, 1.0))
@@ -348,7 +345,7 @@ def score_to_bgr(s):
         b, g, r = int(255 * t), 255, int(55 * (1 - t))
     return (b, g, r)
 
-# ── Draw ALL candidate rollouts on the camera image ───────────────────────────
+# Draw ALL candidate rollouts on the camera image
 def draw_all_rollouts_camera(img, candidates, scores_norm, best_k,
                              max_draw=300, alpha=0.55):
     """Draw a sampled subset of MPPI rollouts on the camera image, coloured by score.
@@ -377,7 +374,7 @@ def draw_all_rollouts_camera(img, candidates, scores_norm, best_k,
             cv2.line(overlay, pts[j-1], pts[j], col, 1, cv2.LINE_AA)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
-# ── Viridis LUT (matches simulate.py cmap='viridis') ─────────────────────────
+# Viridis LUT (matches simulate.py cmap='viridis')
 _VIRIDIS_LUT = None
 def _viridis(arr_u8):
     """Apply matplotlib's viridis colormap via a precomputed LUT (no matplotlib import)."""
@@ -435,16 +432,9 @@ def _viridis(arr_u8):
     return _VIRIDIS_LUT[arr_u8]
 
 
-# ── BEV inset (CREStE dotted-endpoint style) ──────────────────────────────────
+# BEV inset: trav heatmap + rollouts (dotted, endpoint coloured by score)
 def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
                    n_rollouts=60, committed_path=None, greedy_path=None):
-    """CREStE-style BEV panel:
-       • viridis (or muted dark) background showing the traversability heatmap
-       • each rollout drawn as a series of small dots along the trajectory
-       • each rollout terminates in a bigger filled-circle endpoint coloured by score
-       • the chosen path's dots + endpoint glow bright cyan
-       • a clean red car marker at the bottom-centre
-       Looks like a particle-style data viz rather than a tangle of polylines."""
 
     if heatmap is not None:
         bg = heatmap.astype(np.float32)
@@ -486,8 +476,8 @@ def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
             continue
         _draw_rollout(inset, k, base_radius=2, endpoint_radius=4)
 
-    # Chosen path on top with a halo. Prefer the committed (EMA-smoothed)
-    # MPPI nominal trajectory if available so it matches the camera overlay.
+    # Chosen path on top. Prefer the committed_path arg (EMA-smoothed
+    # MPPI output) so the inset matches the camera overlay.
     if committed_path is not None:
         cp = np.asarray(committed_path)
         bpts = [(int(cp[j, 1] * scale), int(cp[j, 0] * scale))
@@ -508,8 +498,7 @@ def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
     cv2.circle(inset, (ex, ey), 8, (255, 240, 90), -1, cv2.LINE_AA)
     cv2.circle(inset, (ex, ey), 8, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # UNet greedy path: small white outlined dots so it reads as the "model's
-    # preferred direction" running alongside MPPI's noisier output.
+    # UNet greedy path overlay (small white outlined dots)
     if greedy_path is not None:
         gp = np.asarray(greedy_path)
         gpts = [(int(gp[j, 1] * scale), int(gp[j, 0] * scale))
@@ -529,7 +518,7 @@ def make_bev_inset(bev, cands, scores_norm, best_k, size=320, heatmap=None,
 
     return inset
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 def run(args):
     device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
     print(f'Device: {device}')
@@ -566,12 +555,11 @@ def run(args):
     writer  = cv2.VideoWriter(args.out, fourcc, args.fps, (IMG_W, IMG_H))
 
     steer_h, planner_h = [], []
-    BEV_PANEL = 340   # BEV inset edge length
+    BEV_PANEL = 340
     BEV_MARGIN = 18
-    # EMA-smoothed display path so the cyan line on the camera reads as a
-    # confident, decisive arc rather than a frame-to-frame jitter.
+    # EMA on the visualised path. 0 = show raw planner output.
     ema_path = None
-    EMA_ALPHA = 0.0    # no display smoothing — show raw planner output
+    EMA_ALPHA = 0.0
 
     for i in range(n):
         img = cv2.imread(frames[i]['img'])
@@ -600,7 +588,7 @@ def run(args):
         steer_h.append(human)
         planner_h.append(steer)
 
-        # ── Compute MPPI nominal trajectory + UNet greedy path ───────────────
+        # Compute MPPI nominal trajectory + UNet greedy path
         # MPPI: weighted average over K=1000 sampled rollouts (planner output)
         nom_path = planner.nominal_trajectory()
         if ema_path is None:
@@ -618,7 +606,7 @@ def run(args):
         else:
             greedy_path = None
 
-        # ── Camera overlay ───────────────────────────────────────────────────
+        # Camera overlay
         # 1) Filled cyan corridor around the MPPI committed path
         draw_filled_path(img, ema_path, (220, 200, 90), alpha=0.28)
         # 2) UNet greedy path drawn as a WHITE DASHED line (the trained
@@ -633,7 +621,7 @@ def run(args):
         draw_path_on_image(img, ema_path, (255, 240, 80),
                            thickness=4, alpha=0.95)
 
-        # ── BEV inset (top-right corner) ─────────────────────────────────────
+        # BEV inset (top-right corner)
         inset = make_bev_inset(bev, cands, scores_norm, best_k,
                                size=BEV_PANEL, heatmap=heatmap, n_rollouts=60,
                                committed_path=ema_path,
@@ -649,7 +637,7 @@ def run(args):
                     (x0 + 2, cap_y), cv2.FONT_HERSHEY_SIMPLEX, 0.44,
                     (210, 210, 210), 1, cv2.LINE_AA)
 
-        # ── Minimal top-left HUD ─────────────────────────────────────────────
+        # Minimal top-left HUD
         # Single dark pill, just title + autonomy dot + steering bar.
         pill_w, pill_h = 360, 76
         pill = img.copy()
@@ -696,7 +684,7 @@ def run(args):
                     (bar_x + bar_w - 110, bar_y + bar_h + 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160, 160, 160), 1, cv2.LINE_AA)
 
-        # ── Bottom-left two-path legend (honest framing) ─────────────────────
+        # Bottom-left legend for the two paths
         leg_x, leg_y = BEV_MARGIN, IMG_H - 56
         leg_overlay = img.copy()
         cv2.rectangle(leg_overlay, (leg_x - 4, leg_y - 4),

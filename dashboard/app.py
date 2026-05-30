@@ -199,14 +199,14 @@ def stop_current():
         add_log('[DASHBOARD] Stopped current mode')
     state['process'] = None
     state['mode'] = 'idle'
-    # Clear camera frame cache so feed goes dark instead of freezing on old frame
+    # Drop the cached frame so the feed goes dark instead of freezing
     state['latest_jpeg'] = None
-    # Kill any stray ROS2 nodes left over from previous sessions
+    # Reap any stray nodes from previous sessions
     subprocess.run(
         ['pkill', '-f', 'mapless_nav/(camera|gps|teleop|pwm|safety|data_recorder|waypoint|perception|bev|reward|planner|speed|intervention)'],
         capture_output=True
     )
-    # Also kill any stray ros2 launch processes from previous direct SSH launches
+    # And direct-SSH launches
     subprocess.run(['pkill', '-f', 'ros2 launch mapless_nav'], capture_output=True)
     time.sleep(1)
 
@@ -345,9 +345,8 @@ async def handle_ws_message(ws, data):
         mode = data.get('mode')
         threading.Thread(target=start_mode, args=(mode,), daemon=True).start()
         await broadcast({'type': 'mode', 'mode': mode})
-        # Signal autonomous mode — publish to BOTH /autonomous_mode (planner direct)
-        # AND /set_autonomous (teleop, for joystick override awareness).
-        # Retry every 2s for 30s so nodes that start late still get the signal.
+        # Publish on /autonomous_mode (planner) and /set_autonomous (teleop,
+        # for joystick override). Retry for 30 s so late-starting nodes catch it.
         if mode == 'autonomous':
             subprocess.Popen(
                 f'bash -c "'
