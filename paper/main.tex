@@ -11,9 +11,11 @@
 \IEEEoverridecommandlockouts
 
 \usepackage{cite}
-\usepackage{amsmath,amssymb,amsfonts}
-\usepackage{algorithmic}
+\usepackage{amsmath,amsfonts}
 \usepackage{graphicx}
+% Use Computer Modern monospace instead of Courier (avoids needing the pcr
+% font package, which BasicTeX doesn't bundle).
+\renewcommand{\ttdefault}{cmtt}
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{booktabs}
@@ -27,9 +29,10 @@
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 
 %---- Convenience macros ------------------------------------------------------
-\newcommand{\bev}{\mathbf{F}_{\text{BEV}}}
+\newcommand{\bev}{\mathbf{F}_{\mathrm{BEV}}}
+\newcommand{\bevt}{\mathbf{F}_{\mathrm{BEV},t}}
 \newcommand{\unet}{f_\psi}
-\newcommand{\corrturns}{\text{corr}_{\text{turns}}}
+\newcommand{\corrturns}{\mathrm{corr}_{\mathrm{turns}}}
 \newcommand{\sigm}{\sigma}
 
 \begin{document}
@@ -301,7 +304,7 @@ dilated trajectory mask with radius $r = 3$:
 The negative mask $N_t$ is the set of cells with any non-zero DINOv2
 feature that are \emph{outside} the positive corridor:
 \begin{equation}
-  N_t(i, j) = \mathbb{I}\left[\|\bev_t(i, j, :)\|_0 > 0\right] \cdot (1 - Y_t(i, j)).
+  N_t(i, j) = \mathbb{I}\left[\|\bevt(i, j, :)\|_0 > 0\right] \cdot (1 - Y_t(i, j)).
 \end{equation}
 This concentrates negatives on visually-informative cells the human did not
 choose to drive on, rather than on empty cells outside the camera field of
@@ -310,8 +313,8 @@ view.
 \paragraph{Loss.}
 We minimise per-mask normalised binary cross-entropy:
 \begin{equation}
-  \mathcal{L} = -\frac{1}{|Y_t|} \sum_{(i,j) \in Y_t} \log \sigm(\unet(\bev_t)_{ij})
-              -\frac{1}{|N_t|} \sum_{(i,j) \in N_t} \log (1 - \sigm(\unet(\bev_t)_{ij})).
+  \mathcal{L} = -\frac{1}{|Y_t|} \sum_{(i,j) \in Y_t} \log \sigm(\unet(\bevt)_{ij})
+              -\frac{1}{|N_t|} \sum_{(i,j) \in N_t} \log (1 - \sigm(\unet(\bevt)_{ij})).
 \end{equation}
 Optimiser: Adam with $\eta = 5\times10^{-4}$, batch size $B = 8$, $E = 15$
 epochs on $8{,}331$ frames with $50/50$ horizontal-flip augmentation
