@@ -81,30 +81,24 @@ def build_figure():
     # Lane bands are visual grouping only. Compute block y-positions first.
     blocks = [
         # (kind, title, subtitle)
-        ('sensor',     'EMEET 4K Webcam',
-         '1280 × 720 @ 30 Hz  ·  manual 1/2000 s shutter\nMJPEG → V4L2 capture'),
-        ('perception', 'DINOv2 ViT-S/14  +  Depth Anything V2',
-         '384-dim patch features (14 × 14)   ·   dense monocular depth\n'
-         'both TensorRT-optimised on Orin'),
+        ('sensor',     'Camera',
+         '1280x720, manual exposure'),
+        ('perception', 'DINOv2 + Depth Anything V2',
+         '384-dim patch features\nmonocular dense depth'),
         ('perception', 'BEV Projection',
-         'back-project (u, v, d) → R³  ·  bin into 64 × 64 grid\n'
-         '15 cm/cell  ·  9.6 m × 9.6 m footprint  →  F_BEV ∈ R^(64×64×384)'),
-        ('learning',   'TraversabilityUNet  (~8 M params)',
-         '384 → 1 spatial regressor  ·  weighted BCE\n'
-         'labels = dilated human-rollout corridor masks'),
-        ('learning',   'σ(f_ψ(F_BEV))     — 64 × 64 sigmoid heatmap',
-         'pos_pred = 0.996   neg_pred = 0.004   margin = +0.992\n'
-         '(reproduced over all 8 331 training-set frames)'),
+         '64x64 grid, 15 cm/cell\n9.6 m forward'),
+        ('learning',   'TraversabilityUNet',
+         'per-cell sigmoid\nweighted BCE on corridor masks'),
+        ('learning',   'Traversability heatmap',
+         '64x64'),
         ('planning',   'MPPI Planner',
-         'K = 1000 samples, T = 8 steps  ·  σ = 0.45, momentum = 0.4\n'
-         'score = mean σ(f_ψ) along rollout  +  β · GPS-bearing bias'),
-        ('control',    'Safety Watchdog  +  PWM Encoder',
-         '500 ms /cmd_* timeout  ·  throttle clamp ±0.38  ·  E-stop short-circuit\n'
-         'cmd ∈ [-1, 1]  →  1000–2000 µs  ·  8 µs deadband'),
+         'K = 1000, T = 8\nscores from heatmap + GPS bearing'),
+        ('control',    'Safety + PWM',
+         '500 ms timeout\nthrottle clamp'),
         ('control',    'ESP8266 Serial Bridge',
-         'USB-CDC 500 kbaud  ·  50 Hz PWM update  ·  arm-retry every 0.5 s'),
-        ('actuation',  'Hardware:  Brushless ESC  +  Steering Servo  →  Arrma Typhon Mega',
-         '1690 µs cruise (clears cogging)  ·  1000–2000 µs steer  ·  3 S LiPo, ~12 km/h'),
+         '50 Hz PWM'),
+        ('actuation',  'ESC + Steering Servo',
+         'Arrma Typhon Mega chassis'),
     ]
 
     # Place top-to-bottom, compute y for each
@@ -118,11 +112,11 @@ def build_figure():
     # Lane bands (group blocks by colour)
     # Indices into the blocks list:
     lane_specs = [
-        (range(0, 3), 'Perception  ·  5 FPS on Jetson Orin Nano',         '#b9d2f7'),
-        (range(3, 5), 'Learned reward model',                             '#ffe3a3'),
-        (range(5, 6), 'Planning',                                         '#f7c9c9'),
-        (range(6, 8), 'Safety + low-level control',                       '#d4c4ee'),
-        (range(8, 9), 'Hardware',                                         '#e2d39a'),
+        (range(0, 3), 'Perception',                  '#b9d2f7'),
+        (range(3, 5), 'Reward model',                 '#ffe3a3'),
+        (range(5, 6), 'Planning',                     '#f7c9c9'),
+        (range(6, 8), 'Safety + control',             '#d4c4ee'),
+        (range(8, 9), 'Hardware',                     '#e2d39a'),
     ]
     for idxs, label, color in lane_specs:
         idxs = list(idxs)
@@ -135,69 +129,43 @@ def build_figure():
     for (kind, title, subtitle), y in zip(blocks, ys):
         block(ax, CX, y, BW, BH, title, subtitle, kind)
 
-    # Vertical arrows between consecutive blocks
-    DATA_LABELS = {
-        (0, 1): None,                     # camera → perception
-        (1, 2): None,
-        (2, 3): 'F_BEV',
-        (3, 4): None,                     # UNet → σ heatmap (same block in code)
-        (4, 5): 'σ(f_ψ(F_BEV))',
-        (5, 6): 'steering, throttle ∈ [-1, 1]',
-        (6, 7): 'safe_cmd_steering / throttle',
-        (7, 8): 'PWM µs',
-    }
-    for (i, j), lab in DATA_LABELS.items():
+    # Plain vertical arrows between consecutive blocks (no inline labels)
+    for i in range(len(blocks) - 1):
         y0 = ys[i]
-        y1 = ys[j] + BH
+        y1 = ys[i + 1] + BH
         x = CX + BW / 2
-        arrow(ax, x, y0, x, y1, label=lab, label_dx=0.30, label_dy=0.0,
-              label_fontsize=8.4)
+        arrow(ax, x, y0, x, y1)
 
     # Sidecar inputs (left of the column)
-    GAP_FROM_COL = 0.55   # gap between sidecar block and central column
+    GAP_FROM_COL = 0.55
 
-    def side_in(y_center, title, subtitle, label, color='#666', dashed=True):
-        sw, sh = 2.6, BH - 0.32
+    def side_in(y_center, title, subtitle, color='#666', dashed=True):
+        sw, sh = 2.4, BH - 0.40
         sx = CX - GAP_FROM_COL - sw
         sy = y_center - sh / 2
         block(ax, sx, sy, sw, sh, title, subtitle, 'side',
               fontsize_title=9, fontsize_sub=7.8)
-        # Arrow stops just before column edge (no head intrusion)
         arrow(ax, sx + sw, y_center, CX - 0.05, y_center,
-              dashed=dashed, color=color, lw=1.3,
-              label=label, label_dx=-(GAP_FROM_COL - 0.05) / 2 - 0.05,
-              label_dy=0.18, label_fontsize=7.8, label_color='#555')
+              dashed=dashed, color=color, lw=1.3)
 
-    # GPS bearing feeds MPPI (bias on score)
-    side_in(ys[5] + BH / 2, 'GPS  (u-blox @ 10 Hz)',
-            'waypoint bearing ψ\nbiases MPPI score', '+β·alignment')
-    # Dashboard feeds the autonomy flag (goes to MPPI mode_cb)
-    side_in(ys[5] + BH + GAP / 2, 'Web Dashboard',
-            'phone-friendly UI\nE-stop / waypoints / log', '/autonomous_mode',
+    side_in(ys[5] + BH / 2, 'GPS', 'waypoint bearing')
+    side_in(ys[5] + BH + GAP / 2, 'Dashboard', 'autonomous_mode flag',
             color='#888')
 
-    # Future RLHF (right side, dashed)
-    fb_w, fb_h = 2.8, BH - 0.32
+    # Future RLHF (right side, dashed, deliberately faint)
+    fb_w, fb_h = 2.4, BH - 0.40
     fb_x = CX + BW + GAP_FROM_COL
     fb_y = ys[4] + (BH - fb_h) / 2
     block(ax, fb_x, fb_y, fb_w, fb_h,
-          'Future: Online RLHF',
-          'log interventions  ·  M = 500 FIFO\nonline BCE update on UNet',
+          'Online RLHF',
+          'future work',
           'side', fontsize_title=9, fontsize_sub=7.8)
     arrow(ax, fb_x, fb_y + fb_h / 2, CX + BW + 0.05, ys[3] + BH / 2,
-          dashed=True, color='#888', rad=-0.12, lw=1.3,
-          label='future feedback', label_dx=0.18, label_dy=0.35,
-          label_fontsize=7.6, label_color='#777')
+          dashed=True, color='#888', rad=-0.12, lw=1.3)
 
     # Title
-    fig.text(0.50, 0.965, 'CREStE-Nano — end-to-end architecture',
-             ha='center', fontsize=15, fontweight='bold', color='#222')
-    fig.text(0.50, 0.943,
-             r'monocular RGB + GPS  $\rightarrow$  BEV traversability '
-             r'$\rightarrow$  MPPI  $\rightarrow$  PWM  '
-             r'$\;\cdot\;$  ~\$500 BOM  '
-             r'$\;\cdot\;$  all 13 ROS 2 nodes on a single Jetson Orin Nano',
-             ha='center', fontsize=10, color='#555')
+    fig.text(0.50, 0.965, 'CREStE-Nano end-to-end architecture',
+             ha='center', fontsize=14, fontweight='bold', color='#222')
 
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     return fig

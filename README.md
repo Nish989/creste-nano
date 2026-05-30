@@ -7,9 +7,9 @@ The robot learns what terrain looks like from ~20 minutes of human driving, then
 
 ---
 
-## 🎥 Demo
+## Demo
 
-**▶ [Watch the demo video (demo.mp4)](demo.mp4)** &nbsp;·&nbsp; the full **8,331 training frames** replayed at 30 Hz (4.63 min). Real recorded camera from Sauls Ranch, Round Rock TX, run through the trained perception + planning pipeline frame-by-frame.
+**[Watch the demo video (demo.mp4)](demo.mp4)** — the full 8,331 training frames replayed at 30 Hz (4.63 min). Real recorded camera from Sauls Ranch, Round Rock TX, run through the trained perception + planning pipeline frame-by-frame.
 
 <p align="center">
   <video src="demo.mp4" controls width="720" muted autoplay loop>
